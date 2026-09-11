@@ -246,10 +246,99 @@ void test_pending_scroll_recovery()
 	assert(fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,4,1).active);
 }
 
+void test_foreign_predecessor_history()
+{
+	constexpr int32_t dim=4;
+	const int token=0;
+	std::array<int32_t,dim*dim> empty{},before{},at_one{},replacement{},after{};
+	before[0*dim+1]=11;
+	at_one[1*dim+1]=11;
+	replacement[1*dim+1]=22;
+	after[2*dim+1]=22;
+	visual_animation_managerst manager;
+	manager.set_linear(true);
+	auto input=make_input(&token,dim,empty.data());
+	set_layer(input,viewport_visual_layer::center,before.data(),empty.data());
+	run_frame(manager,input,990);
+	set_layer(input,viewport_visual_layer::center,at_one.data(),before.data());
+	run_frame(manager,input,1010);
+	// A different sprite occupies the tile; the old movement remains silent linear history.
+	set_layer(input,viewport_visual_layer::center,replacement.data(),at_one.data());
+	run_frame(manager,input,1060);
+	set_layer(input,viewport_visual_layer::center,after.data(),replacement.data());
+	run_frame(manager,input,1310);
+	run_frame(manager,input,1385);
+	const auto movement=manager.get_movement(&token,viewport_visual_layer::center,2,1);
+	// This sprite's first step uses 150 ms, rather than the former occupant's 300 ms cadence.
+	assert(movement.active&&movement.source_x==1&&movement.progress==0.5f);
+}
+
+void test_foreign_predecessor_active_origin()
+{
+	constexpr int32_t dim=4;
+	const int token=0;
+	std::array<int32_t,dim*dim> empty{},before{},at_one{},replacement{},after{};
+	before[0*dim+1]=11;
+	at_one[1*dim+1]=11;
+	replacement[1*dim+1]=22;
+	after[2*dim+1]=22;
+	for(const bool linear:{false,true})
+		{
+		visual_animation_managerst manager;
+		manager.set_linear(linear);
+		auto input=make_input(&token,dim,empty.data());
+		set_layer(input,viewport_visual_layer::center,before.data(),empty.data());
+		run_frame(manager,input,990);
+		set_layer(input,viewport_visual_layer::center,at_one.data(),before.data());
+		run_frame(manager,input,1010);
+		// Several viewport updates can occur between observations. The latest pair identifies
+		// a different sprite, even though the cached movement at its source is still active.
+		set_layer(input,viewport_visual_layer::center,after.data(),replacement.data());
+		run_frame(manager,input,1060);
+		const auto movement=manager.get_movement(&token,viewport_visual_layer::center,2,1);
+		assert(movement.active&&movement.source_x==1&&movement.source_y==1&&movement.progress==0);
+		}
+}
+
+void test_matching_predecessor_continuity()
+{
+	constexpr int32_t dim=4;
+	const int token=0;
+	for(const auto layer:{viewport_visual_layer::center,viewport_visual_layer::vehicle})
+		for(const bool linear:{false,true})
+			{
+			std::array<int32_t,dim*dim> empty{},before{},at_one{},latest_previous{},after{};
+			before[0*dim+1]=11;
+			at_one[1*dim+1]=11;
+			// Vehicle art can change independently between viewport observations.
+			latest_previous[1*dim+1]=layer==viewport_visual_layer::vehicle?22:11;
+			after[2*dim+1]=layer==viewport_visual_layer::vehicle?33:11;
+			visual_animation_managerst manager;
+			manager.set_linear(linear);
+			auto input=make_input(&token,dim,empty.data());
+			set_layer(input,layer,before.data(),empty.data());
+			run_frame(manager,input,990);
+			set_layer(input,layer,at_one.data(),before.data());
+			run_frame(manager,input,1010);
+			run_frame(manager,input,1060);
+			const auto previous=manager.get_movement(&token,layer,1,1);
+			assert(previous.active);
+			const float displayed_x=previous.source_x+(1-previous.source_x)*previous.progress;
+			set_layer(input,layer,after.data(),latest_previous.data());
+			run_frame(manager,input,1060);
+			const auto movement=manager.get_movement(&token,layer,2,1);
+			assert(movement.active&&movement.source_x==displayed_x&&movement.source_y==1&&movement.progress==0);
+			}
+}
+
 } // namespace
 
 int main()
 {
+	test_foreign_predecessor_history();
+	test_foreign_predecessor_active_origin();
+	test_matching_predecessor_continuity();
+
 	test_pending_scroll_cadence();
 	test_pending_scroll_duplicate_timestamps();
 	test_pending_scroll_stale_mismatch();

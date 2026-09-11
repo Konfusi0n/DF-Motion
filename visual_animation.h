@@ -960,6 +960,8 @@ class visual_animation_managerst
 									static_cast<viewport_visual_layer>(layer)||
 									movement.target_x!=visual_source_x||
 									movement.target_y!=visual_source_y||
+									!visual_layer_matches(
+										movement.layer,previous[source],movement.texpos)||
 									(linear&&frame_time_ms-movement.start_time_ms>500))continue;
 								if(predecessor==nullptr||
 									frame_time_ms-movement.start_time_ms<
