@@ -4,6 +4,12 @@
 #ifndef DF_MOTION_ALLOCATION_COUNTS
 #define DF_MOTION_ALLOCATION_COUNTS 0
 #endif
+#ifndef DF_MOTION_ATTRIBUTION
+#define DF_MOTION_ATTRIBUTION 0
+#endif
+#if DF_MOTION_ATTRIBUTION
+#include "attribution_probe.h"
+#else
 namespace allocation_probe {
 #if DF_MOTION_ALLOCATION_COUNTS
 struct Header { void *base; size_t size; uint64_t generation; };
@@ -48,6 +54,7 @@ void operator delete(void *value,std::align_val_t)noexcept{allocation_probe::rel
 void operator delete[](void *value,std::align_val_t)noexcept{allocation_probe::release(value);}
 void operator delete(void *value,size_t,std::align_val_t)noexcept{allocation_probe::release(value);}
 void operator delete[](void *value,size_t,std::align_val_t)noexcept{allocation_probe::release(value);}
+#endif
 #endif
 
 struct SDL_Texture { int unused=0; };
@@ -130,17 +137,25 @@ template<class Callback> uint64_t measure(Callback callback,uint64_t &allocation
     allocated_bytes=allocation_probe::allocated_bytes-bytes_start;
     return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end-start).count());
 }
-template<class Engine> std::vector<Sample> trial(Workload workload,int viewports,int warmup,int batches,int batch_frames) {
+template<class Engine> std::vector<Sample> trial(Workload workload,int viewports,int warmup,int batches,int batch_frames,int iteration,int order) {
     Engine::reset();allocation_probe::reset();
+#if DF_MOTION_ATTRIBUTION
+    attribution_probe::begin_trial(Engine::name,workload_names[size_t(workload)],viewports,iteration,order);
+#endif
     std::vector<Fixture> fixtures(size_t(viewports),Fixture{});
     for(auto &fixture:fixtures)fixture.initialize(workload);
     std::vector<Renderer> renderers(size_t(viewports),Renderer{});
     std::vector<std::optional<typename Engine::Proxies>> proxies(size_t(viewports),std::nullopt);
     std::vector<std::optional<typename Engine::Coverage>> coverage(size_t(viewports),std::nullopt);
+    std::vector<std::pair<int32_t,uint16_t>> selected_entries;
+    selected_entries.reserve(size_t(fixtures.front().dim_x*fixtures.front().dim_y));
     std::vector<Sample> samples(size_t(batches*batch_frames),Sample{});
     uint32_t time=1000;
     for(int frame=-warmup;frame<batches*batch_frames;++frame) {
         int step=frame+warmup;
+#if DF_MOTION_ATTRIBUTION
+        attribution_probe::begin_frame(frame,frame<0?"warmup":"frame");
+#endif
         for(auto &fixture:fixtures)fixture.advance(workload,step);
         // The paused case repeats one timestamp throughout; other cases sample 250 Hz.
         if(workload!=Workload::paused)time+=4;
@@ -148,12 +163,24 @@ template<class Engine> std::vector<Sample> trial(Workload workload,int viewports
         const auto bytes_start=allocation_probe::allocated_bytes;
         allocation_probe::peak_bytes=allocation_probe::live_bytes;
         Sample sample;sample.frame=frame;sample.batch=frame<0?-1:frame/batch_frames;
-        sample.sync_ns=measure([&]{Engine::begin(time);for(auto &fixture:fixtures)Engine::synchronize(fixture);Engine::end();},
+        sample.sync_ns=measure([&]{
+#if DF_MOTION_ATTRIBUTION
+            attribution_probe::Scope phase(attribution_probe::Phase::synchronization,1);
+#endif
+            Engine::begin(time);for(auto &fixture:fixtures)Engine::synchronize(fixture);Engine::end();},
                               sample.phase_allocations[0],sample.phase_allocated_bytes[0]);
-        sample.collector_ns=measure([&]{for(int viewport=0;viewport<viewports;++viewport)
+        sample.collector_ns=measure([&]{
+#if DF_MOTION_ATTRIBUTION
+            attribution_probe::Scope phase(attribution_probe::Phase::collector_other,2);
+#endif
+            for(int viewport=0;viewport<viewports;++viewport)
             proxies[size_t(viewport)].emplace(Engine::proxies(renderers[size_t(viewport)],fixtures[size_t(viewport)]));},
             sample.phase_allocations[1],sample.phase_allocated_bytes[1]);
-        sample.coverage_ns=measure([&]{for(int viewport=0;viewport<viewports;++viewport)
+        sample.coverage_ns=measure([&]{
+#if DF_MOTION_ATTRIBUTION
+            attribution_probe::Scope phase(attribution_probe::Phase::coverage,3);
+#endif
+            for(int viewport=0;viewport<viewports;++viewport)
             coverage[size_t(viewport)].emplace(Engine::coverage(*proxies[size_t(viewport)],fixtures[size_t(viewport)].dim_y));},
             sample.phase_allocations[2],sample.phase_allocated_bytes[2]);
         // Complete output digest and operation counts are consumed outside timed regions.
@@ -173,17 +200,41 @@ template<class Engine> std::vector<Sample> trial(Workload workload,int viewports
             const auto &covered=*coverage[size_t(viewport)];sample.covered_tiles+=covered.all.size();
             for(const auto &tile:covered.all){hash=mix(hash,uint32_t(tile.first));hash=mix(hash,uint32_t(tile.second));}
             for(const auto &group:covered.groups)for(const auto &tile:group){hash=mix(hash,uint32_t(tile.first));hash=mix(hash,uint32_t(tile.second));}
-            for(const auto &entry:covered.selected){hash=mix(hash,uint32_t(entry.first));hash=mix(hash,entry.second);}
+            // unordered_map order differs across STL implementations. Canonicalize only
+            // the untimed validation digest, retaining production collection order.
+            selected_entries.assign(covered.selected.begin(),covered.selected.end());
+            std::sort(selected_entries.begin(),selected_entries.end());
+            for(const auto &entry:selected_entries){hash=mix(hash,uint32_t(entry.first));hash=mix(hash,entry.second);}
         }
         sample.checksum=hash;
-        sample.cleanup_ns=measure([&]{for(auto &item:proxies)item.reset();for(auto &item:coverage)item.reset();},
+        sample.cleanup_ns=measure([&]{
+#if DF_MOTION_ATTRIBUTION
+            attribution_probe::Scope phase(attribution_probe::Phase::returned_destruction,4);
+#endif
+            for(auto &item:proxies)item.reset();
+#if DF_MOTION_ATTRIBUTION
+            attribution_probe::SiteScope coverage_site(5);
+#endif
+            for(auto &item:coverage)item.reset();},
                                  sample.phase_allocations[3],sample.phase_allocated_bytes[3]);
         sample.allocations=allocation_probe::allocations-allocation_start;
         sample.allocated_bytes=allocation_probe::allocated_bytes-bytes_start;
         sample.retained_bytes=allocation_probe::live_bytes;sample.peak_live_bytes=allocation_probe::peak_bytes;
+#if DF_MOTION_ATTRIBUTION
+        attribution_probe::emit_frame(sample.allocations,sample.allocated_bytes,sample.retained_bytes);
+#endif
         if(frame>=0)samples[size_t(frame)]=sample;
     }
+#if DF_MOTION_ATTRIBUTION
+    attribution_probe::begin_frame(batches*batch_frames,"teardown");
+    const auto teardown_allocations=allocation_probe::allocations,teardown_bytes=allocation_probe::allocated_bytes;
+    allocation_probe::enabled=true;
+    {attribution_probe::Scope phase(attribution_probe::Phase::teardown,6);Engine::reset();}
+    allocation_probe::enabled=false;
+    attribution_probe::emit_frame(allocation_probe::allocations-teardown_allocations,allocation_probe::allocated_bytes-teardown_bytes,allocation_probe::live_bytes);
+#else
     Engine::reset();
+#endif
     proxies.clear();coverage.clear();allocation_probe::reset();
     return samples;
 }
@@ -214,6 +265,10 @@ int main(int argc,char **argv) {
     if(viewport_filter!="all"&&viewport_filter!="1"&&viewport_filter!="9") {
         std::cerr<<"Viewport filter must be 1, 9, or all\n";return 2;
     }
+#if DF_MOTION_ATTRIBUTION
+    std::ios::sync_with_stdio(false);std::cerr.unsetf(std::ios::unitbuf);std::cerr.tie(nullptr);
+    attribution_probe::calibration();
+#endif
     std::cout<<"engine,workload,viewports,trial,order,batch,frame,sync_ns,collector_ns,coverage_ns,cleanup_ns,total_ns,allocations,allocated_bytes,sync_allocations,sync_allocated_bytes,collector_allocations,collector_allocated_bytes,coverage_allocations,coverage_allocated_bytes,cleanup_allocations,cleanup_allocated_bytes,retained_bytes,peak_live_bytes,proxies,moving_proxies,mirrored_proxies,texture_calls,covered_tiles,checksum\n";
     for(int iteration=0;iteration<trials;++iteration)for(int v:{1,9})for(size_t w=0;w<workload_names.size();++w) {
         if(viewport_filter!="all"&&viewport_filter!=(v==1?"1":"9"))continue;
@@ -222,8 +277,8 @@ int main(int argc,char **argv) {
         // Alternate AB/BA within each workload and reverse by viewport/workload to limit order bias.
         bool baseline_first=((iteration+int(w)+(v==9))&1)==0;
         std::vector<Sample> a,b;
-        if(baseline_first){a=trial<baseline::Engine>(workload,v,warmup,batches,batch_frames);b=trial<candidate::Engine>(workload,v,warmup,batches,batch_frames);}
-        else{b=trial<candidate::Engine>(workload,v,warmup,batches,batch_frames);a=trial<baseline::Engine>(workload,v,warmup,batches,batch_frames);}
+        if(baseline_first){a=trial<baseline::Engine>(workload,v,warmup,batches,batch_frames,iteration,0);b=trial<candidate::Engine>(workload,v,warmup,batches,batch_frames,iteration,1);}
+        else{b=trial<candidate::Engine>(workload,v,warmup,batches,batch_frames,iteration,0);a=trial<baseline::Engine>(workload,v,warmup,batches,batch_frames,iteration,1);}
         for(size_t frame=0;frame<a.size();++frame)if(a[frame].checksum!=b[frame].checksum||a[frame].proxies!=b[frame].proxies||
             a[frame].texture_calls!=b[frame].texture_calls||a[frame].covered_tiles!=b[frame].covered_tiles) {
             std::cerr<<"Performance fixture output mismatch workload="<<workload_names[w]<<" viewports="<<v<<" trial="<<iteration<<" frame="<<frame<<'\n';return 3;

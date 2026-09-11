@@ -42,7 +42,7 @@ def distribution(values):
             "worst": ordered[-1], "minimum": ordered[0]}
 
 
-def summarize(raw_path, allocation_counts=False):
+def summarize(raw_path, allocation_counts=False, attribution=False):
     with raw_path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
     if not rows:
@@ -97,7 +97,7 @@ def summarize(raw_path, allocation_counts=False):
                             "allocations_per_frame_median_delta": candidate["allocations"]["median"] - entry["allocations"]["median"] if allocation_counts else None})
     return {"frame_sample_count": len(rows), "quantiles": "nearest rank; median averages middle pair",
             "allocation_counts_available": allocation_counts,
-            "measurement_mode": "allocation_instrumented" if allocation_counts else "clean_timing",
+            "measurement_mode": "diagnostic_attribution" if attribution else "allocation_instrumented" if allocation_counts else "clean_timing",
             "negative_change_means": "candidate lower cost", "groups": summaries, "comparisons": comparisons}
 
 
@@ -118,6 +118,7 @@ def main():
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline", default=BASELINE)
+    parser.add_argument("--candidate-commit", help="Exact immutable candidate commit; required for attribution")
     parser.add_argument("--msvc-root", type=Path, required=True,
                         help="MSVC version root containing bin/Hostx64/x64/cl.exe and include")
     parser.add_argument("--sdk-root", type=Path, default=Path(r"C:\Program Files (x86)\Windows Kits\10"))
@@ -131,9 +132,14 @@ def main():
     parser.add_argument("--build-only", action="store_true", help="Capture/build inputs without executing timings")
     parser.add_argument("--allocation-counts", action="store_true",
                         help="Separate instrumented allocation run; primary timing runs omit replacement allocation operators entirely")
+    parser.add_argument("--attribution", action="store_true", help="Source-tagged diagnostic phases and allocation sites; separate from clean timings")
     args = parser.parse_args()
+    if args.attribution and not args.candidate_commit:
+        parser.error("Attribution requires --candidate-commit to freeze its exact production inputs")
+    if args.attribution:
+        args.allocation_counts = True
     output, msvc, sdk = args.output.resolve(), args.msvc_root.resolve(), args.sdk_root.resolve()
-    source = generate(args.repo, output, args.baseline)
+    source = generate(args.repo, output, args.baseline, args.candidate_commit, args.attribution)
     compiler = msvc / "bin" / "Hostx64" / "x64" / "cl.exe"
     if not compiler.is_file():
         parser.error("MSVC compiler does not exist at the supplied version root")
@@ -151,13 +157,14 @@ def main():
     executable = output / "presentation-performance.exe"
     command = [str(compiler), "/Bv", "/std:c++17", "/O2", "/MD", "/EHsc", "/UNDEBUG", "/W4",
                "/DDF_MOTION_ALLOCATION_COUNTS=" + str(int(args.allocation_counts)),
+               "/DDF_MOTION_ATTRIBUTION=" + str(int(args.attribution)),
                str(output / "presentation-performance.cpp"), "/Fe:" + str(executable),
                "/Fo:" + str(output / "presentation-performance.obj"), "/link", "/MACHINE:X64"]
     receipt = {"started_at": utc(), "system": system_info(), "source": source,
                "compiler": str(compiler), "compiler_sha256": digest(compiler), "compiler_arguments": command,
                "sdk_version": args.sdk_version, "runner_sha256": digest(__file__),
                "inherited_tool_option_variables_removed": removed_option_variables,
-               "measurement_mode": "allocation_instrumented" if args.allocation_counts else "clean_timing",
+               "measurement_mode": "diagnostic_attribution" if args.attribution else "allocation_instrumented" if args.allocation_counts else "clean_timing",
                "replacement_allocation_operators_compiled": args.allocation_counts,
                "configuration": {"trials_per_variant": args.trials, "warmup_frames_per_trial": args.warmup,
                                  "batches_per_trial": args.batches, "frames_per_batch": args.batch_frames,
@@ -188,7 +195,8 @@ def main():
     run_command = [str(executable), str(args.trials), str(args.warmup), str(args.batches), str(args.batch_frames), args.workload, args.viewports]
     receipt["run_arguments"] = run_command
     start = time.monotonic()
-    with (output / "raw-samples.csv").open("wb") as raw, (output / "run.stderr.log").open("wb") as errors:
+    diagnostic_path = output / ("raw-attribution.jsonl" if args.attribution else "run.stderr.log")
+    with (output / "raw-samples.csv").open("wb") as raw, diagnostic_path.open("wb") as errors:
         result = subprocess.run(run_command, cwd=output, stdout=raw, stderr=errors)
     receipt["run_exit_code"] = result.returncode
     receipt["elapsed_seconds"] = time.monotonic() - start
@@ -197,10 +205,30 @@ def main():
     if result.returncode:
         receipt["status"] = "failed_no_performance_conclusion"
         save()
-        raise SystemExit(f"Benchmark failed; inspect {output / 'run.stderr.log'}")
-    summary = summarize(output / "raw-samples.csv", args.allocation_counts)
+        raise SystemExit(f"Benchmark failed; inspect {diagnostic_path}")
+    summary = summarize(output / "raw-samples.csv", args.allocation_counts, args.attribution)
+    expected_samples = args.trials * args.batches * args.batch_frames * 2 * (6 if args.workload == "all" else 1) * (2 if args.viewports == "all" else 1)
+    if summary["frame_sample_count"] != expected_samples:
+        receipt["status"] = "failed_incomplete_samples"
+        save()
+        raise SystemExit("Benchmark did not emit the exact requested sample count")
+    receipt["expected_frame_samples"] = expected_samples
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     receipt["summary_sha256"] = digest(output / "summary.json")
+    if args.attribution:
+        import attribution_summary
+        try:
+            details = attribution_summary.summarize(diagnostic_path, output / "insertion-manifest.json",
+                                                    receipt["configuration"], output / "raw-samples.csv")
+        except Exception as error:
+            receipt["status"] = "failed_attribution_validation"
+            receipt["attribution_error"] = str(error)
+            save()
+            raise
+        (output / "attribution-summary.json").write_text(json.dumps(details, indent=2) + "\n", encoding="utf-8")
+        receipt["attribution_summary_sha256"] = digest(output / "attribution-summary.json")
+        receipt["raw_attribution_sha256"] = digest(diagnostic_path)
+        receipt["attribution_summarizer_sha256"] = digest(Path(__file__).with_name("attribution_summary.py"))
     receipt["status"] = "completed_offline_measurement"
     receipt["output_digests_equal_every_paired_frame"] = True
     save()

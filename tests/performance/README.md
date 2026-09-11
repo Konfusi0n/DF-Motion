@@ -105,3 +105,7 @@ summary. The compiler's complete version report is retained in `compile.log`.
 The adapters omit SDL drawing, native DF objects/ABI, real texture-cache work,
 GPU time, game input, and fortress simulation. A retained optimization still
 needs independent correctness, native plugin, and eventual live-game proof.
+
+See [ATTRIBUTION.md](ATTRIBUTION.md) for the separate source-site diagnostic mode,
+its immutable candidate input, phase/allocation/lifetime records, and the limits
+on attributing allocator time from an instrumented executable.
