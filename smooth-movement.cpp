@@ -1419,7 +1419,10 @@ void render_interpolated_world(df::renderer_2d_base *renderer)
 		cancel_camera_transients();
 		camera_has_prev=false;
 		}
-	const uint32_t now_ms=Core::getInstance().p->getTickCount();
+	// GetTickCount advances in coarse steps on Windows, repeating positions at high refresh.
+	// Keep the manager's wrapping millisecond clock, sampled once for every viewport.
+	const uint32_t now_ms=uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count());
 	animation_manager.begin_frame(now_ms);
 	for(df::graphic_viewportst *viewport:viewports)
 		animation_manager.synchronize_viewport(animation_input(viewport));
