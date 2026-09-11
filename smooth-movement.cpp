@@ -1038,6 +1038,8 @@ std::vector<render_proxyst> collect_proxies(
 	std::sort(candidate_tiles.begin(),candidate_tiles.end());
 	candidate_tiles.erase(
 		std::unique(candidate_tiles.begin(),candidate_tiles.end()),candidate_tiles.end());
+	// Use unique candidate tiles as a capacity hint; multiple layers may still need more.
+	proxies.reserve(candidate_tiles.size());
 	// The center layer is painted first. Only accepted center proxies can own fragments.
 	std::vector<int32_t> center_proxy_at(size_t(vp->dim_x)*size_t(vp->dim_y),-1);
 	const auto anchor_matches=[&](
