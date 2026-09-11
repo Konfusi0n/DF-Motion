@@ -74,10 +74,191 @@ void run_frame(
 	manager.end_frame();
 }
 
+struct pending_scroll_fixturest
+{
+	static constexpr int32_t dim=6;
+	static constexpr uint32_t timeout_ms=2000;
+	int token=0;
+	std::array<int32_t,dim*dim> empty{};
+	std::array<int32_t,dim*dim> background{};
+	std::array<int32_t,dim*dim> background_old{};
+	visual_animation_managerst manager;
+	viewport_visual_animation_inputst input;
+
+	explicit pending_scroll_fixturest(uint32_t start_ms,int32_t shift=1):
+		input(make_input(&token,dim,empty.data()))
+		{
+		fill_background(background,1000);
+		background_old=background;
+		input.current_background=background.data();
+		input.previous_background=background_old.data();
+		frame(start_ms-1);
+		input.pan_x=shift;
+		frame(start_ms);
+		assert(scroll().pending&&!scroll().landed&&!scroll().abandoned);
+		}
+
+	void frame(uint32_t now_ms)
+		{
+		run_frame(manager,input,now_ms);
+		}
+
+	visual_scroll_renderst scroll() const
+		{
+		return manager.get_scroll(&token);
+		}
+};
+
+void test_pending_scroll_cadence()
+{
+	// Waiting for a viewport update has the same wall-clock allowance at every refresh rate.
+	constexpr uint32_t start_ms=1000;
+	for(const uint32_t fps:{30U,60U,120U,144U,165U,240U,360U})
+		{
+		pending_scroll_fixturest fixture(start_ms);
+		for(uint32_t frame=1;frame*1000/fps<pending_scroll_fixturest::timeout_ms;++frame)
+			{
+			fixture.frame(start_ms+frame*1000/fps);
+			assert(fixture.scroll().pending&&!fixture.scroll().abandoned);
+			}
+		fixture.frame(start_ms+pending_scroll_fixturest::timeout_ms);
+		assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+		}
+}
+
+void test_pending_scroll_duplicate_timestamps()
+{
+	pending_scroll_fixturest fixture(1000);
+	for(int repeat=0;repeat<300;++repeat)
+		{
+		fixture.frame(1000);
+		assert(fixture.scroll().pending&&!fixture.scroll().abandoned);
+		}
+	fixture.frame(2999);
+	assert(fixture.scroll().pending);
+	fixture.frame(3000);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+}
+
+void test_pending_scroll_stale_mismatch()
+{
+	pending_scroll_fixturest fixture(1000);
+	fill_background(fixture.background_old,5000);
+	fixture.frame(1001); // One genuinely new, unmatchable viewport pair.
+	assert(fixture.scroll().pending);
+	fixture.frame(2999); // Repeated mismatching buffers cannot disable the time bound.
+	assert(fixture.scroll().pending);
+	fixture.frame(3000);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+}
+
+void test_pending_scroll_clock_rollover()
+{
+	// Zero is a valid enqueue time; only an empty queue means there is no pending timer.
+	pending_scroll_fixturest zero(0);
+	zero.input.pan_x=2;
+	zero.frame(1999);
+	assert(zero.scroll().pending);
+	zero.frame(2000);
+	assert(zero.scroll().abandoned&&!zero.scroll().pending);
+
+	const uint32_t start_ms=std::numeric_limits<uint32_t>::max()-1000;
+	pending_scroll_fixturest fixture(start_ms);
+	fixture.frame(start_ms+1999U);
+	assert(fixture.scroll().pending);
+	fixture.frame(start_ms+2000U);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+}
+
+void test_pending_scroll_partial_landing_deadline()
+{
+	pending_scroll_fixturest fixture(1000,3);
+	// A real landing wins even exactly at the deadline, and starts a new wait for its remainder.
+	shift_background(fixture.background,fixture.background_old,fixture.dim,1,0,5000);
+	fixture.frame(3000);
+	assert(fixture.scroll().landed&&!fixture.scroll().abandoned&&
+		fixture.scroll().pending&&fixture.scroll().pending_x==2);
+	fixture.background_old=fixture.background;
+	fixture.frame(3001);
+	fixture.frame(4999);
+	assert(fixture.scroll().pending&&!fixture.scroll().abandoned);
+	fixture.frame(5000);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+
+	pending_scroll_fixturest complete(1000);
+	shift_background(complete.background,complete.background_old,complete.dim,1,0,5000);
+	complete.frame(3000);
+	assert(complete.scroll().landed&&!complete.scroll().abandoned&&!complete.scroll().pending);
+}
+
+void test_pending_scroll_multi_event_progress()
+{
+	pending_scroll_fixturest fixture(0);
+	fixture.input.pan_x=0; // Opposing hints cancel in total, but both still await their buffers.
+	fixture.frame(1000);
+	assert(fixture.scroll().pending&&fixture.scroll().pending_x==0);
+	shift_background(fixture.background,fixture.background_old,fixture.dim,1,0,5000);
+	fixture.frame(2000);
+	// Retiring the first event is real progress although the remaining signed debt grows.
+	assert(fixture.scroll().landed&&!fixture.scroll().abandoned&&
+		fixture.scroll().landed_x==1&&fixture.scroll().pending&&fixture.scroll().pending_x==-1);
+	fixture.background_old=fixture.background;
+	fixture.frame(2001);
+	fixture.frame(3999);
+	assert(fixture.scroll().pending&&!fixture.scroll().abandoned);
+	fixture.frame(4000);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+}
+
+void test_pending_scroll_additional_hint_does_not_extend_deadline()
+{
+	pending_scroll_fixturest fixture(1000);
+	fixture.input.pan_x=2;
+	fixture.frame(2999);
+	assert(fixture.scroll().pending&&fixture.scroll().pending_x==2);
+	fixture.frame(3000);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+}
+
+void test_pending_scroll_recovery()
+{
+	pending_scroll_fixturest fixture(1000);
+	fixture.frame(3000);
+	assert(fixture.scroll().abandoned&&!fixture.scroll().pending);
+	// Identical redraws must not consume either of the two settling updates.
+	for(int repeat=0;repeat<20;++repeat)fixture.frame(3000);
+	std::array<int32_t,fixture.dim*fixture.dim> old_creature{};
+	std::array<int32_t,fixture.dim*fixture.dim> creature{};
+	old_creature[1*fixture.dim+1]=77;
+	creature[2*fixture.dim+1]=77;
+	set_layer(fixture.input,viewport_visual_layer::center,creature.data(),old_creature.data());
+	fixture.frame(3001);
+	assert(!fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,2,1).active);
+	old_creature=creature;
+	creature[2*fixture.dim+1]=0;
+	creature[3*fixture.dim+1]=77;
+	fixture.frame(3002);
+	assert(!fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,3,1).active);
+	old_creature=creature;
+	creature[3*fixture.dim+1]=0;
+	creature[4*fixture.dim+1]=77;
+	fixture.frame(3003);
+	assert(fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,4,1).active);
+}
+
 } // namespace
 
 int main()
 {
+	test_pending_scroll_cadence();
+	test_pending_scroll_duplicate_timestamps();
+	test_pending_scroll_stale_mismatch();
+	test_pending_scroll_clock_rollover();
+	test_pending_scroll_partial_landing_deadline();
+	test_pending_scroll_multi_event_progress();
+	test_pending_scroll_additional_hint_does_not_extend_deadline();
+	test_pending_scroll_recovery();
+
 	visual_animation_managerst manager;
 	manager.begin_frame(1000);
 	assert(manager.get_frame_time_ms()==1000);

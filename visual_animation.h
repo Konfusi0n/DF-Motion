@@ -306,8 +306,8 @@ class visual_animation_managerst
 		std::vector<std::array<int32_t,2>> pending;
 		// Redraws no prefix has matched.
 		int32_t pending_frames=0;
-		// Redraws spent waiting for the buffers to move at all.
-		int32_t pending_age=0;
+		// Time of first queued scroll or latest proven landing, independent of redraw rate.
+		uint32_t pending_progress_time_ms=0;
 		// Redraws left in which new-movement detection stays suppressed after scroll activity.
 		int32_t suppress_frames=0;
 		// Buffer contents last seen, to recognize a repeat of them.
@@ -334,13 +334,13 @@ class visual_animation_managerst
 	static constexpr size_t max_pending_shifts=8;
 	static constexpr int32_t max_pending_shift_debt=6;
 	// Bounds the wait on a scroll that never lands, so suppression cannot stick forever.
-	static constexpr int32_t max_pending_age_frames=120;
+	static constexpr uint32_t max_pending_stall_ms=2000;
 
 	static void clear_pending(viewport_animationst &state)
 		{
 		state.pending.clear();
 		state.pending_frames=0;
-		state.pending_age=0;
+		state.pending_progress_time_ms=0;
 		}
 
 	static std::array<int32_t,2> pending_total(const viewport_animationst &state)
@@ -626,6 +626,7 @@ class visual_animation_managerst
 					reset_facing(state);
 					state.abandoned_this_frame=true;
 					}
+				if(state.pending.empty())state.pending_progress_time_ms=frame_time_ms;
 				state.pending.push_back(
 					{saturated_pan_delta(input.pan_x,state.pan_x),
 						saturated_pan_delta(input.pan_y,state.pan_y)});
@@ -796,7 +797,7 @@ class visual_animation_managerst
 							state.pending.erase(state.pending.begin());
 						}
 					state.pending_frames=0;
-					state.pending_age=0;
+					state.pending_progress_time_ms=state.pending.empty()?0:frame_time_ms;
 					// The scroll is accounted for; the settle window must not block the rebased pass.
 					state.suppress_frames=0;
 					landed_shift=best.shift;
@@ -808,10 +809,9 @@ class visual_animation_managerst
 					{
 					bool used_background=false;
 					const double ratio=scroll_shift_match_ratio(input,0,0,used_background);
-					if(ratio>=(used_background?0.6:0.5)&&
-						++state.pending_age<=max_pending_age_frames)
+					if(ratio>=(used_background?0.6:0.5))
 						state.pending_frames=0;
-					else if(++state.pending_frames>4||state.pending_age>max_pending_age_frames)
+					else if(++state.pending_frames>4)
 						{
 						abandon_pending(state);
 						reset_facing(state);
@@ -819,6 +819,17 @@ class visual_animation_managerst
 						state.abandoned_this_frame=true;
 						}
 					}
+				}
+
+			// A proven landing wins even at the deadline; a partial landing renews the wait above.
+			// Check unchanged, unmatchable buffers too: they cannot make pending_testable true.
+			if(!state.pending.empty()&&
+				uint32_t(frame_time_ms-state.pending_progress_time_ms)>=max_pending_stall_ms)
+				{
+				abandon_pending(state);
+				reset_facing(state);
+				state.suppress_frames=2;
+				state.abandoned_this_frame=true;
 				}
 
 			const bool suppress=(!buffers_advanced&&!translated)||crossed_views||
