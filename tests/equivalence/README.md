@@ -55,13 +55,26 @@ scrolls, cancellation, invalidation, expiry, and equal-area dimension swaps.
 The standalone manager suite independently asserts observable movement-ID
 behavior for buffer refresh and verifies that repeated inputs still advance time.
 
-The Stage 1 evidence directory contains two deliberately broken candidate copies:
+The rejected Stage 1 experiment's evidence directory contains two deliberately broken candidate copies:
 one trusts an existing snapshot without comparing bytes; the other retains stale
 snapshot bytes after a change. Both must compile successfully and fail the oracle.
 A separate forced-collision demonstration overrides only the reference signature
 function with constant zero and checks that the reference misses a changed buffer
 while the exact candidate detects it. This is controlled fault injection, **not a
 naturally discovered FNV collision**. These mutations never enter production code.
+
+For movement-owned interpolation policy, generate with `--fixed-modes`. Each
+trace still exercises its initial linear or eased mode through the candidate's
+captured-policy implementation. The random setter event and index invalidation
+remain, and no PRNG draw or comparison is removed; only the mode toggle is
+suppressed. The receipt and PASS line identify this schedule explicitly. The
+reference production files remain exact `5a4c448`.
+
+Mid-flight mode changes intentionally differ from the reference. The standalone
+manager suite tests those changes with explicit expectations, including the
+expired-eased predecessor boundary. A legacy-toggle differential failure is
+not a fixed-mode regression; do not describe the new cross-mode behavior as
+equivalent to the old global-policy behavior.
 
 Comparisons include movement IDs and numeric fields, facing/scroll/follow/redraw
 state, complete ordered proxy fields, per-proxy coverage, aggregate coverage and

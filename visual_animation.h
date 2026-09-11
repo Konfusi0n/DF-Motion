@@ -282,6 +282,8 @@ class visual_animation_managerst
 		int32_t target_y;
 		uint32_t start_time_ms;
 		uint32_t duration_ms;
+		// The current setting applies only when creating a record, never mid-movement.
+		bool linear=false;
 		bool historical=false;
 	};
 
@@ -548,14 +550,13 @@ class visual_animation_managerst
 		{
 		return animation_progress(
 			frame_time_ms,movement.start_time_ms,
-			linear?movement.duration_ms:movement_duration_ms,linear);
+			movement.duration_ms,movement.linear);
 		}
 
 	bool movement_active(const movementst &movement) const
 		{
 		return !movement.historical&&
-			frame_time_ms-movement.start_time_ms<
-			(linear?movement.duration_ms:movement_duration_ms);
+			frame_time_ms-movement.start_time_ms<movement.duration_ms;
 		}
 
 	static constexpr size_t no_movement_index=std::numeric_limits<size_t>::max();
@@ -606,7 +607,8 @@ class visual_animation_managerst
 		{
 		return a.source_x-a.target_x==b.source_x-b.target_x&&
 			a.source_y-a.target_y==b.source_y-b.target_y&&
-			a.start_time_ms==b.start_time_ms&&a.duration_ms==b.duration_ms;
+			a.start_time_ms==b.start_time_ms&&a.duration_ms==b.duration_ms&&
+			a.linear==b.linear;
 		}
 
 	visual_movement_renderst indexed_movement(
@@ -702,7 +704,8 @@ class visual_animation_managerst
 				companion->source_y-companion->target_y!=
 					movement.source_y-movement.target_y||
 				companion->start_time_ms!=movement.start_time_ms||
-				companion->duration_ms!=movement.duration_ms))
+				companion->duration_ms!=movement.duration_ms||
+				companion->linear!=movement.linear))
 				ambiguous=true;
 			else if(companion==nullptr)
 				companion=&movement;
@@ -760,7 +763,7 @@ class visual_animation_managerst
 					{
 					if(movement.historical)continue;
 					force_full_redraw=true;
-					if(linear&&frame_time_ms-movement.start_time_ms>=movement.duration_ms)
+					if(movement.linear&&frame_time_ms-movement.start_time_ms>=movement.duration_ms)
 						movement.historical=true;
 					}
 				}
@@ -1135,19 +1138,21 @@ class visual_animation_managerst
 							if(candidate_count!=1)continue;
 
 							claimed_sources[source]=1;
+							const bool movement_linear=linear;
 							float visual_source_x=float(source/input.dim_y);
 							float visual_source_y=float(source%input.dim_y);
 							const movementst *predecessor=nullptr;
 							for(size_t i=0;i<existing_movement_count;++i)
 								{
 								const movementst &movement=state.movements[i];
+								const uint32_t age=frame_time_ms-movement.start_time_ms;
 								if(movement.layer!=
 									static_cast<viewport_visual_layer>(layer)||
 									movement.target_x!=visual_source_x||
 									movement.target_y!=visual_source_y||
 									!visual_layer_matches(
 										movement.layer,previous[source],movement.texpos)||
-									(linear&&frame_time_ms-movement.start_time_ms>500))continue;
+									(movement.linear?age>500U:age>=movement.duration_ms))continue;
 								if(predecessor==nullptr||
 									frame_time_ms-movement.start_time_ms<
 									frame_time_ms-predecessor->start_time_ms)
@@ -1164,7 +1169,7 @@ class visual_animation_managerst
 									visual_source_y=predecessor->source_y+
 										(predecessor->target_y-predecessor->source_y)*progress;
 									}
-								if(linear)duration_ms=std::clamp(
+								if(movement_linear)duration_ms=std::clamp(
 									frame_time_ms-predecessor->start_time_ms,
 									movement_duration_ms,500U);
 								}
@@ -1179,7 +1184,8 @@ class visual_animation_managerst
 								x,
 								y,
 								frame_time_ms,
-								duration_ms
+								duration_ms,
+								movement_linear
 								});
 							const int32_t source_x=source/input.dim_y;
 							const int32_t source_y=source%input.dim_y;
@@ -1240,13 +1246,13 @@ class visual_animation_managerst
 						const int32_t current=input.current[layer][target];
 						const bool invalid=current==0||
 							!visual_layer_matches(movement.layer,current,movement.texpos);
-						if(linear)
+						if(movement.linear)
 							{
 							if(invalid||frame_time_ms-movement.start_time_ms>=movement.duration_ms)
 								movement.historical=true;
 							return frame_time_ms-movement.start_time_ms>500;
 							}
-						return frame_time_ms-movement.start_time_ms>=movement_duration_ms||invalid;
+						return frame_time_ms-movement.start_time_ms>=movement.duration_ms||invalid;
 						}),
 				state.movements.end());
 			// has_mirrored is recomputed here rather than maintained at every write site.

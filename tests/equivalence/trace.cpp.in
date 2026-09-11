@@ -276,7 +276,10 @@ void random_trace(uint32_t seed) {
         else if(event==3) {f.shift(1,0);}
         else if(event==4) {cancel(f);}
         else if(event==5) {
-            linear=!linear;baseline::animation_manager.set_linear(linear);
+            // Keep the event, setter invalidation, checks and PRNG schedule in fixed-mode
+            // runs. Only the intentional policy switch is excluded from legacy equivalence.
+            if(!TRACE_FIXED_MODES)linear=!linear;
+            baseline::animation_manager.set_linear(linear);
             candidate::animation_manager.set_linear(linear);check(f);
         } else if(event==6) {
             baseline::flip_enabled=!baseline::flip_enabled;candidate::flip_enabled=baseline::flip_enabled;
@@ -309,7 +312,8 @@ int main() {
     dense_cross_viewport_traces(false);dense_cross_viewport_traces(true);
     for(uint32_t seed=1;seed<=100;++seed)random_trace(seed);
     require(moving_proxies>0&&resting_mirrors>0,"nonvacuous moving and resting mirror coverage");
-    std::cout<<"PASS seeds=100 targeted_modes=2 exact_buffer_modes=2 dense_cross_viewport_modes=2 lookup_checks="<<lookup_checks
+    std::cout<<"PASS interpolation_schedule="<<(TRACE_FIXED_MODES?"fixed_per_trace":"legacy_mode_toggles")
+        <<" seeds=100 targeted_modes=2 exact_buffer_modes=2 dense_cross_viewport_modes=2 lookup_checks="<<lookup_checks
         <<" collector_checks="<<collector_checks<<" index_checks="<<index_checks
         <<" proxy_checks="<<proxy_checks<<" moving_proxies="<<moving_proxies<<" resting_mirrors="<<resting_mirrors
         <<" trace_fingerprint="<<std::hex<<trace_fingerprint<<std::dec

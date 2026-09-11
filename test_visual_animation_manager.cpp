@@ -5,6 +5,8 @@
 #undef NDEBUG
 #endif
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 
@@ -513,10 +515,186 @@ void test_exact_buffer_idle_and_invalidation()
 		}
 }
 
+void policy_expect(bool condition,const char *label)
+{
+	if(!condition)
+		{
+		std::fprintf(stderr,"FAIL movement policy: %s\n",label);
+		std::exit(1);
+		}
+}
+
+struct movement_policy_fixturest
+{
+	static constexpr int32_t dim=6;
+	int token=0;
+	std::array<int32_t,dim*dim> empty{},current{},previous{};
+	visual_animation_managerst manager;
+	viewport_visual_animation_inputst input;
+
+	movement_policy_fixturest(bool linear,uint32_t start):
+		input(make_input(&token,dim,empty.data()))
+		{
+		manager.set_linear(linear);
+		current[1]=77;
+		set_layer(input,viewport_visual_layer::center,current.data(),previous.data());
+		run_frame(manager,input,start-1);
+		step(start,1);
+		}
+	void step(uint32_t now,int32_t x)
+		{
+		previous=current;current.fill(0);current[x*dim+1]=77;
+		run_frame(manager,input,now);
+		}
+	void observe(uint32_t now)
+		{
+		previous=current;
+		run_frame(manager,input,now);
+		}
+	visual_movement_renderst movement(int32_t x)const
+		{
+		return manager.get_movement(&token,viewport_visual_layer::center,x,1);
+		}
+};
+
+void test_movement_creation_policy()
+{
+	for(bool linear:{false,true})
+		for(uint32_t start:{1000U,std::numeric_limits<uint32_t>::max()-80U})
+			{
+			movement_policy_fixturest fixture(linear,start);
+			fixture.manager.begin_frame(start+25U);
+			const auto before=fixture.movement(1);
+			policy_expect(before.active&&before.progress==animation_progress(start+25U,start,150U,linear),
+				"initial record uses creation policy");
+			fixture.manager.set_linear(!linear);
+			const auto after=fixture.movement(1);
+			policy_expect(after.active&&after.progress==before.progress&&
+				after.source_x==before.source_x&&after.movement_id==before.movement_id,
+				"toggle cannot reinterpret existing record before sync");
+			fixture.manager.synchronize_viewport(fixture.input);fixture.manager.end_frame();
+			policy_expect(fixture.movement(1).progress==before.progress,
+				"toggle cannot reinterpret existing record after sync");
+			fixture.observe(start+149U);
+			policy_expect(fixture.movement(1).active,"record remains active before its original deadline");
+			fixture.manager.begin_frame(start+150U);
+			policy_expect(!fixture.movement(1).active,"record expires at its original deadline");
+			fixture.manager.synchronize_viewport(fixture.input);fixture.manager.end_frame();
+			}
+
+	for(bool linear:{false,true})
+		{
+		movement_policy_fixturest fixture(linear,1000U);
+		fixture.manager.begin_frame(1050U);
+		const auto old=fixture.movement(1);
+		const float displayed=old.source_x+(1-old.source_x)*old.progress;
+		fixture.manager.set_linear(!linear);fixture.step(1050U,2);
+		const auto next=fixture.movement(2);
+		policy_expect(next.active&&next.source_x==displayed&&next.progress==0&&
+			next.movement_id!=old.movement_id,"new step continues old policy's visual position");
+		fixture.observe(1075U);
+		policy_expect(fixture.movement(2).progress==animation_progress(1075U,1050U,150U,!linear),
+			"new step captures changed policy");
+		}
+}
+
+void test_movement_policy_stored_duration()
+{
+	movement_policy_fixturest fixture(true,1000U);
+	fixture.step(1300U,2); // completed linear history trains a 300 ms step
+	fixture.manager.begin_frame(1400U);
+	const auto before=fixture.movement(2);
+	policy_expect(before.active&&before.progress==float(1)/3,"linear record learned 300 ms duration");
+	fixture.manager.set_linear(false);
+	policy_expect(fixture.movement(2).progress==before.progress,
+		"switch to eased retains active linear progress and duration");
+	fixture.manager.synchronize_viewport(fixture.input);fixture.manager.end_frame();
+	fixture.observe(1450U);
+	policy_expect(fixture.movement(2).active&&fixture.movement(2).progress==0.5f,
+		"300 ms linear record stays active beyond eased 150 ms deadline");
+	fixture.manager.begin_frame(1600U);
+	policy_expect(!fixture.movement(2).active,"linear record finishes at its stored deadline");
+	fixture.manager.synchronize_viewport(fixture.input);fixture.manager.end_frame();
+	fixture.step(1650U,3);fixture.observe(1700U);
+	policy_expect(fixture.movement(3).source_x==2&&
+		fixture.movement(3).progress==animation_progress(1700U,1650U,150U,false),
+		"new eased step keeps fixed duration after linear history");
+}
+
+void test_movement_policy_predecessor_lifetime()
+{
+	for(uint32_t start:{1000U,std::numeric_limits<uint32_t>::max()-100U})
+		for(uint32_t age:{150U,151U,500U,800U})
+			{
+			movement_policy_fixturest fixture(false,start);
+			fixture.manager.set_linear(true);
+			// No intermediate sync: the expired eased record is still physically stored.
+			fixture.step(start+age,2);fixture.observe(start+age+75U);
+			const auto next=fixture.movement(2);
+			policy_expect(next.active&&next.source_x==1&&next.progress==0.5f,
+				"expired eased record cannot train a new linear cadence");
+			}
+	for(uint32_t age:{500U,501U})
+		{
+		movement_policy_fixturest fixture(true,1000U);
+		fixture.manager.set_linear(false);fixture.observe(1200U);
+		policy_expect(!fixture.movement(1).active,"completed linear record stays silent across toggle");
+		fixture.manager.begin_frame(1201U);
+		policy_expect(!fixture.manager.requires_full_redraw(),"linear history does not repeatedly request redraw");
+		fixture.manager.synchronize_viewport(fixture.input);fixture.manager.end_frame();
+		fixture.manager.set_linear(true);fixture.step(1000U+age,2);fixture.observe(1075U+age);
+		const uint32_t duration=age==500U?500U:150U;
+		policy_expect(fixture.movement(2).source_x==1&&
+			fixture.movement(2).progress==float(75)/duration,
+			"linear history survives mode switch through 500 ms inclusive");
+		}
+}
+
+void test_mixed_policy_companion_ambiguity()
+{
+	constexpr int32_t dim=6;
+	const int token=0;
+	for(bool first_linear:{false,true})
+		{
+		std::array<int32_t,dim*dim> empty{},initial{},first{},second{};
+		initial[3*dim+1]=11;initial[1*dim+3]=22;
+		first=initial;first[3*dim+1]=0;first[4*dim+1]=11;
+		second=first;second[1*dim+3]=0;second[2*dim+3]=22;
+		visual_animation_managerst manager;manager.set_linear(first_linear);
+		auto input=make_input(&token,dim,empty.data());
+		set_layer(input,viewport_visual_layer::center,initial.data(),empty.data());
+		run_frame(manager,input,1000U);
+		set_layer(input,viewport_visual_layer::center,first.data(),initial.data());
+		run_frame(manager,input,1016U);
+		manager.set_linear(!first_linear);
+		set_layer(input,viewport_visual_layer::center,second.data(),first.data());
+		run_frame(manager,input,1016U);
+		manager.begin_frame(1041U);
+		for(bool indexed:{false,true})
+			{
+			if(indexed){manager.synchronize_viewport(input);manager.end_frame();}
+			const auto older=manager.get_movement(&token,viewport_visual_layer::center,4,1);
+			const auto newer=manager.get_movement(&token,viewport_visual_layer::center,2,3);
+			policy_expect(older.active&&newer.active&&older.progress!=newer.progress,
+				"equal geometry and timestamps can have different captured policies");
+			for(auto layer:{viewport_visual_layer::item,viewport_visual_layer::designation})
+				policy_expect(!manager.get_movement(&token,layer,3,2).active,
+					"mixed-policy nonexact companion is ambiguous in scan and index");
+			const auto exact=manager.get_movement(&token,viewport_visual_layer::right,5,1);
+			policy_expect(exact.active&&exact.inherited&&exact.movement_id==older.movement_id&&
+				exact.progress==older.progress,"exact fragment retains its own policy and movement ID");
+			}
+		}
+}
+
 } // namespace
 
 int main()
 {
+	test_movement_creation_policy();
+	test_movement_policy_stored_duration();
+	test_movement_policy_predecessor_lifetime();
+	test_mixed_policy_companion_ambiguity();
 	test_exact_buffer_content_and_refresh();
 	test_exact_buffer_background_presence();
 	test_exact_buffer_idle_and_invalidation();

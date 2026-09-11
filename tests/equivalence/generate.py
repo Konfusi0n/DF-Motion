@@ -78,6 +78,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--fixed-modes", action="store_true",
+                        help="Keep each trace's initial interpolation mode; mode-switch semantics have separate tests")
     parser.add_argument("--allow-unindexed", action="store_true",
                         help="Bootstrap harness only; does not validate an index implementation")
     args = parser.parse_args()
@@ -107,6 +109,7 @@ def main():
         generated += namespace(name, decoded[name + "/visual_animation.h"],
                                decoded[name + "/smooth-movement.cpp"])
     generated += ("\n#define HAS_INDEX_API 1\n" if indexed else "\n#define HAS_INDEX_API 0\n")
+    generated += "#define TRACE_FIXED_MODES " + str(int(args.fixed_modes)) + "\n"
     generated += driver
     args.output.mkdir(parents=True, exist_ok=True)
     output_cpp = args.output / "collector-equivalence.cpp"
@@ -116,6 +119,8 @@ def main():
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
     receipt = {"baseline_commit": BASELINE, "candidate_index_api_present": indexed,
+               "interpolation_schedule": "fixed_per_trace" if args.fixed_modes else "legacy_mode_toggles",
+               "reference_production_code_modified": False,
                "source_sha256": {name: digest(data) for name, data in files.items()},
                "generated_cpp_sha256": digest(output_cpp.read_bytes()),
                "generator_sha256": digest(Path(__file__).read_bytes()),
