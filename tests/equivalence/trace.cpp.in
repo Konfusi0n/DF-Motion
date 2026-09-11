@@ -111,19 +111,39 @@ void reset_pair(bool linear) {
     baseline::animation_manager.set_linear(linear);candidate::animation_manager.set_linear(linear);
     baseline::flip_enabled=candidate::flip_enabled=true;
 }
-void frame(Fixture &f,uint32_t time,bool invalid=false) {
+template<class Input,class Manager>
+void sync_fixture(Manager &manager,Fixture &f,bool invalid,int backgrounds) {
+    Input input;
+    input.viewport=&f;input.dim_x=f.dim_x;input.dim_y=f.dim_y;
+    input.context_revision=f.revision;input.pan_x=f.pan_x;input.pan_y=f.pan_y;
+    for(size_t i=0;i<input.current.size();++i) {
+        input.current[i]=f.now[i].data();input.previous[i]=f.old[i].data();
+    }
+    input.current_background=(backgrounds&1)?f.background.data():nullptr;
+    input.previous_background=(backgrounds&2)?f.background_old.data():nullptr;
+    if(invalid)input.current[0]=nullptr;
+    f.screentexpos_old=f.old[1].data();manager.synchronize_viewport(input);
+}
+void sync_pair(Fixture &f,bool invalid=false,int backgrounds=3) {
+    sync_fixture<baseline::viewport_visual_animation_inputst>(baseline::animation_manager,f,invalid,backgrounds);
+    sync_fixture<candidate::viewport_visual_animation_inputst>(candidate::animation_manager,f,invalid,backgrounds);
+}
+void record_fixture(const Fixture &f,uint32_t time,bool invalid,int backgrounds) {
     const auto record=[](uint64_t value){trace_fingerprint=(trace_fingerprint^value)*0x100000001b3ULL;};
     record(trace_seed);record(trace_step);record(time);record(uint32_t(f.dim_x));record(uint32_t(f.dim_y));
-    record(f.revision);record(uint32_t(f.pan_x));record(uint32_t(f.pan_y));record(invalid);
+    record(f.revision);record(uint32_t(f.pan_x));record(uint32_t(f.pan_y));record(invalid);record(backgrounds);
     record(baseline::animation_manager.is_linear());record(baseline::flip_enabled);
     for(int value:f.clipx)record(uint32_t(value));for(int value:f.clipy)record(uint32_t(value));
     for(const auto &layer:f.now)for(int value:layer)record(uint32_t(value));
     for(const auto &layer:f.old)for(int value:layer)record(uint32_t(value));
     for(int value:f.background)record(uint32_t(value));for(int value:f.background_old)record(uint32_t(value));
     for(uint8_t value:f.fire)record(value);for(int value:f.missing)record(uint32_t(value));
+}
+void frame(Fixture &f,uint32_t time,bool invalid=false,int backgrounds=3) {
+    record_fixture(f,time,invalid,backgrounds);
     baseline::animation_manager.begin_frame(time);candidate::animation_manager.begin_frame(time);
     check(f,false,false);
-    baseline::sync(f,invalid);candidate::sync(f,invalid);
+    sync_pair(f,invalid,backgrounds);
     baseline::animation_manager.end_frame();candidate::animation_manager.end_frame();
     check(f,!invalid);
 }
@@ -168,6 +188,72 @@ void targeted(bool linear) {
         "duplicate-center second record active through public lookup");
     require(!baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::designation,2,3).active,
         "duplicate-center differing start times make companions ambiguous");
+}
+void exact_buffer_traces(bool linear) {
+    trace_seed=linear?102:101;trace_step=0;reset_pair(linear);
+    Fixture f;f.resize(7,5);f.now[1][f.index(1,2)]=11;frame(f,8000,false,0);
+    f.snapshot();f.now[1][f.index(1,2)]=0;f.now[1][f.index(2,2)]=11;
+    frame(f,8016,false,0);
+    uint32_t now=8016;
+    // Retain the center step, changing every tracked current/previous buffer in place.
+    for(int layer:{1,6,7,8}) {
+        f.now[layer].back()=101+layer;frame(f,++now,false,0);frame(f,++now,false,0);
+        f.old[layer].back()=201+layer;frame(f,++now,false,0);frame(f,++now,false,0);
+    }
+    f.now[0].back()=31;f.old[5].back()=36;frame(f,++now,false,0);
+    for(auto &layer:f.now){auto identical=layer;layer.swap(identical);}
+    for(auto &layer:f.old){auto identical=layer;layer.swap(identical);}
+    frame(f,++now,false,0); // new pointers, identical bytes
+    for(int presence:{1,3,3,2,0,3})frame(f,++now,false,presence);
+    ++f.background.back();frame(f,++now);frame(f,++now);
+    ++f.background_old.back();frame(f,++now);frame(f,++now);
+    frame(f,8075);cancel(f);frame(f,8076);frame(f,8077,true);frame(f,8078);
+    ++f.background[0];frame(f,8079);frame(f,8500); // invalidation then exact-input expiry
+}
+void dense_cross_viewport_traces(bool linear) {
+    trace_seed=linear?104:103;trace_step=0;reset_pair(linear);
+    Fixture large,small;large.resize(32,24);small.resize(7,5);
+    const auto populate=[](Fixture &f) {
+        for(int x=0;x<f.dim_x;x+=2)for(int y=1;y<f.dim_y;++y) {
+            f.now[1][f.index(x,y)]=10+f.index(x,y);
+            for(int layer:{0,2,3,4,5})f.now[layer][f.index(x,y)]=1500+layer;
+        }
+    };
+    populate(large);populate(small);
+    const auto paired=[&](uint32_t now,bool reverse=false,bool invalidate_large=false,int backgrounds=3) {
+        record_fixture(large,now,invalidate_large,backgrounds);record_fixture(small,now,false,3);
+        baseline::animation_manager.begin_frame(now);candidate::animation_manager.begin_frame(now);
+        check(large,false,false);check(small,false,false);
+        if(reverse){sync_pair(small);sync_pair(large,invalidate_large,backgrounds);}
+        else{sync_pair(large,invalidate_large,backgrounds);sync_pair(small);}
+        baseline::animation_manager.end_frame();candidate::animation_manager.end_frame();
+        check(large,!invalidate_large);check(small);
+    };
+    paired(9000);
+    uint32_t now=9000;
+    for(trace_step=1;trace_step<=8;++trace_step) {
+        const int dx=trace_step%2?1:-1;
+        for(Fixture *f:{&large,&small}) {
+            f->snapshot();
+            for(int x=0;x<f->dim_x;++x)for(int y=0;y<f->dim_y;++y) {
+                const int source_x=x-dx;
+                f->now[1][f->index(x,y)]=source_x>=0&&source_x<f->dim_x?
+                    f->old[1][f->index(source_x,y)]:0;
+            }
+        }
+        now+=17;paired(now,(trace_step&1)!=0);
+        paired(++now,(trace_step&1)==0); // idle input still updates interpolation
+    }
+    // One manager's scratch serves different sizes and synchronization orders.
+    ++large.pan_x;++small.pan_y;paired(++now);
+    large.shift(1,0);small.shift(0,1);paired(++now,true);
+    large.snapshot();small.snapshot();paired(++now);
+    baseline::animation_manager.cancel_transitions();candidate::animation_manager.cancel_transitions();
+    paired(++now,true);paired(++now,false,true);paired(++now,true);
+    for(int presence:{0,1,2,3})paired(++now,(presence&1)!=0,false,presence);
+    large.resize(12,8);small.resize(8,12);populate(large);populate(small);paired(++now,true);
+    large.resize(8,12);small.resize(12,8);populate(large);populate(small);paired(++now);
+    paired(now+501,true);
 }
 void random_trace(uint32_t seed) {
     trace_seed=seed;trace_step=0;uint32_t rng=seed*0x9e3779b9U+1;bool linear=(seed&1)!=0;
@@ -219,9 +305,11 @@ void random_trace(uint32_t seed) {
 }
 int main() {
     targeted(false);targeted(true);
+    exact_buffer_traces(false);exact_buffer_traces(true);
+    dense_cross_viewport_traces(false);dense_cross_viewport_traces(true);
     for(uint32_t seed=1;seed<=100;++seed)random_trace(seed);
     require(moving_proxies>0&&resting_mirrors>0,"nonvacuous moving and resting mirror coverage");
-    std::cout<<"PASS seeds=100 targeted_modes=2 lookup_checks="<<lookup_checks
+    std::cout<<"PASS seeds=100 targeted_modes=2 exact_buffer_modes=2 dense_cross_viewport_modes=2 lookup_checks="<<lookup_checks
         <<" collector_checks="<<collector_checks<<" index_checks="<<index_checks
         <<" proxy_checks="<<proxy_checks<<" moving_proxies="<<moving_proxies<<" resting_mirrors="<<resting_mirrors
         <<" trace_fingerprint="<<std::hex<<trace_fingerprint<<std::dec

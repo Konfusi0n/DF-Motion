@@ -23,6 +23,7 @@
 #include "df/viewport_spatter_flag.h"
 
 #include "visual_animation.h"
+#include "renderer_state.h"
 
 #include <SDL_render.h>
 
@@ -117,6 +118,8 @@ decltype(&SDL_RenderCopyF) render_copy_f=nullptr;
 decltype(&SDL_RenderCopyExF) render_copy_ex_f=nullptr;
 decltype(&SDL_RenderFillRect) render_fill_rect=nullptr;
 decltype(&SDL_RenderSetClipRect) render_set_clip_rect=nullptr;
+decltype(&SDL_RenderGetClipRect) render_get_clip_rect=nullptr;
+decltype(&SDL_RenderIsClipEnabled) render_is_clip_enabled=nullptr;
 decltype(&SDL_GetRenderDrawColor) get_render_draw_color=nullptr;
 decltype(&SDL_SetRenderDrawColor) set_render_draw_color=nullptr;
 
@@ -1505,27 +1508,29 @@ void render_interpolated_world(df::renderer_2d_base *renderer)
 			tile_pixel(vp->clipy[1]+1,renderer->origin_y,zoom)-
 				tile_pixel(vp->clipy[0],renderer->origin_y,zoom)
 			};
+		const scoped_sdl_clipst clip(sdl_renderer,
+			render_set_clip_rect,render_get_clip_rect,render_is_clip_enabled);
+		// Keep replacement semantics while drawing; restore the caller's clip on exit.
 		render_set_clip_rect(sdl_renderer,&map_rect);
-		Uint8 old_r=0,old_g=0,old_b=0,old_a=255;
-		get_render_draw_color(sdl_renderer,&old_r,&old_g,&old_b,&old_a);
-		set_render_draw_color(sdl_renderer,0,0,0,255);
-		render_fill_rect(sdl_renderer,&map_rect);
-		set_render_draw_color(sdl_renderer,old_r,old_g,old_b,old_a);
-
-		const int32_t saved_origin_x=renderer->origin_x;
-		const int32_t saved_origin_y=renderer->origin_y;
-		renderer->origin_x+=glide_x;
-		renderer->origin_y+=glide_y;
-		for(int32_t x=vp->clipx[0];x<=vp->clipx[1];++x)
 			{
-			for(int32_t y=vp->clipy[0];y<=vp->clipy[1];++y)
-				redraw_world_tile(renderer,viewport_renders,coverage,x,y);
+			const scoped_sdl_colorst color(sdl_renderer,set_render_draw_color,get_render_draw_color);
+			if(!color.captured)return;
+			set_render_draw_color(sdl_renderer,0,0,0,255);
+			render_fill_rect(sdl_renderer,&map_rect);
 			}
-		draw_viewport_interpolation_stages(
-			renderer,viewport_renders,coverage,carried_items);
-		renderer->origin_x=saved_origin_x;
-		renderer->origin_y=saved_origin_y;
-		render_set_clip_rect(sdl_renderer,nullptr);
+
+			{
+			const scoped_render_originst origin(renderer->origin_x,renderer->origin_y);
+			renderer->origin_x+=glide_x;
+			renderer->origin_y+=glide_y;
+			for(int32_t x=vp->clipx[0];x<=vp->clipx[1];++x)
+				{
+				for(int32_t y=vp->clipy[0];y<=vp->clipy[1];++y)
+					redraw_world_tile(renderer,viewport_renders,coverage,x,y);
+				}
+			draw_viewport_interpolation_stages(
+				renderer,viewport_renders,coverage,carried_items);
+			}
 
 		// Everything was repainted; per-tile coverage bookkeeping restarts after the glide.
 		previous_coverage.clear();
@@ -1534,22 +1539,23 @@ void render_interpolated_world(df::renderer_2d_base *renderer)
 
 	tile_coveragest redraw_coverage=coverage;
 	redraw_coverage.insert(previous_coverage.begin(),previous_coverage.end());
-	Uint8 old_r=0,old_g=0,old_b=0,old_a=255;
-	get_render_draw_color(sdl_renderer,&old_r,&old_g,&old_b,&old_a);
-	set_render_draw_color(sdl_renderer,0,0,0,255);
-	for(const auto &[x,y]:redraw_coverage)
 		{
-		if(!inside_clip(vp,x,y))continue;
-		const SDL_Rect tile_rect=
+		const scoped_sdl_colorst color(sdl_renderer,set_render_draw_color,get_render_draw_color);
+		if(!color.captured)return;
+		set_render_draw_color(sdl_renderer,0,0,0,255);
+		for(const auto &[x,y]:redraw_coverage)
 			{
-			tile_pixel(x,renderer->origin_x,zoom),
-			tile_pixel(y,renderer->origin_y,zoom),
-			tile_size,
-			tile_size
-			};
-		render_fill_rect(sdl_renderer,&tile_rect);
+			if(!inside_clip(vp,x,y))continue;
+			const SDL_Rect tile_rect=
+				{
+				tile_pixel(x,renderer->origin_x,zoom),
+				tile_pixel(y,renderer->origin_y,zoom),
+				tile_size,
+				tile_size
+				};
+			render_fill_rect(sdl_renderer,&tile_rect);
+			}
 		}
-	set_render_draw_color(sdl_renderer,old_r,old_g,old_b,old_a);
 
 	for(const auto &[x,y]:redraw_coverage)
 		{
@@ -1583,6 +1589,8 @@ void clear_sdl_bindings()
 	render_copy_ex_f=nullptr;
 	render_fill_rect=nullptr;
 	render_set_clip_rect=nullptr;
+	render_get_clip_rect=nullptr;
+	render_is_clip_enabled=nullptr;
 	get_render_draw_color=nullptr;
 	set_render_draw_color=nullptr;
 }
@@ -1602,6 +1610,8 @@ bool load_sdl(color_ostream &out)
 	bind(SDL_RenderCopyExF,render_copy_ex_f);
 	bind(SDL_RenderFillRect,render_fill_rect);
 	bind(SDL_RenderSetClipRect,render_set_clip_rect);
+	bind(SDL_RenderGetClipRect,render_get_clip_rect);
+	bind(SDL_RenderIsClipEnabled,render_is_clip_enabled);
 	bind(SDL_GetRenderDrawColor,get_render_draw_color);
 	bind(SDL_SetRenderDrawColor,set_render_draw_color);
 	#undef bind

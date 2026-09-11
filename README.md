@@ -1,6 +1,10 @@
-# DF Smooth Movement
+# DF Motion
 
-A visual plugin for Dwarf Fortress that makes movement smoother.
+DF Motion is a development fork of [DF Smooth Movement by notliad](https://github.com/notliad/df-smooth-movement). It preserves the original creature, vehicle, carried-object and camera interpolation architecture while improving high-refresh timing, rendering correctness and motion continuity. Dwarf Fortress's simulation remains authoritative.
+
+The tile-indexing adaptation credits Tom Van Eyck's [upstream PR #22](https://github.com/notliad/df-smooth-movement/pull/22). His [PR #24](https://github.com/notliad/df-smooth-movement/pull/24) informed an exact-snapshot and scratch-reuse experiment; that experiment was rejected because repeated busy-frame measurements were ambiguous. Upstream authorship and the MIT license are preserved; no upstream endorsement is implied.
+
+This branch is a local pre-live candidate. Deterministic tests and CPU fixtures do not establish real-game FPS gains or player-perceived smoothness. The plugin and commands retain the `smooth-movement` name for compatibility.
 
 ## Features
 

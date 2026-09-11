@@ -2,7 +2,7 @@
 
 `generate.py` uses Python's standard library and invokes Git with a subprocess
 argument list, never a shell. The reference is pinned to
-`48020d06aa4cfaefaed0d953535252e610770e90`. It reads that commit's complete
+`5a4c448440d732097ace2a0cb415d8762c0a0d30`. It reads that commit's complete
 `visual_animation.h` and exact `render_proxyst`, `render_coveragest`, layer-bit,
 `collect_proxies`, and `collect_coverage` declarations. The candidate comes from
 the selected working tree. Reference and candidate production bodies are not
@@ -45,6 +45,23 @@ injection are used.
 PRNG draws assigning coordinates are explicitly sequenced before function calls.
 The final trace fingerprint hashes the integer fixture data and frame settings;
 its value and comparison counts should match across Zig and native MSVC builds.
+
+Stage 1 also compares exact-buffer refresh using current and previous values in
+every tracked layer, unchanged repetitions, different pointers with identical
+bytes, mutations through unchanged pointers, and absent/partial/present background
+pairs. Dense 32-by-24 and 7-by-5 viewports share a manager and alternate
+synchronization order. Their traces include walking, idle interpolation, landed
+scrolls, cancellation, invalidation, expiry, and equal-area dimension swaps.
+The standalone manager suite independently asserts observable movement-ID
+behavior for buffer refresh and verifies that repeated inputs still advance time.
+
+The Stage 1 evidence directory contains two deliberately broken candidate copies:
+one trusts an existing snapshot without comparing bytes; the other retains stale
+snapshot bytes after a change. Both must compile successfully and fail the oracle.
+A separate forced-collision demonstration overrides only the reference signature
+function with constant zero and checks that the reference misses a changed buffer
+while the exact candidate detects it. This is controlled fault injection, **not a
+naturally discovered FNV collision**. These mutations never enter production code.
 
 Comparisons include movement IDs and numeric fields, facing/scroll/follow/redraw
 state, complete ordered proxy fields, per-proxy coverage, aggregate coverage and

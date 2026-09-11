@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: MIT
+// Allocation accounting belongs to this executable only, never the plugin.
+// Requested bytes exclude allocator metadata. Fixtures/adapters allocate outside scopes.
+#ifndef DF_MOTION_ALLOCATION_COUNTS
+#define DF_MOTION_ALLOCATION_COUNTS 0
+#endif
+namespace allocation_probe {
+#if DF_MOTION_ALLOCATION_COUNTS
+struct Header { void *base; size_t size; uint64_t generation; };
+#endif
+uint64_t generation=1,allocations=0,allocated_bytes=0,live_bytes=0,peak_bytes=0;
+bool enabled=false;
+#if DF_MOTION_ALLOCATION_COUNTS
+void *allocate(size_t size,size_t alignment) {
+    alignment=std::max(alignment,alignof(Header));
+    if(size>std::numeric_limits<size_t>::max()-alignment-sizeof(Header))throw std::bad_alloc();
+    void *base=std::malloc(size+alignment+sizeof(Header));
+    if(!base)throw std::bad_alloc();
+    const uintptr_t first=reinterpret_cast<uintptr_t>(base)+sizeof(Header);
+    const uintptr_t aligned=(first+alignment-1)&~(uintptr_t(alignment)-1);
+    auto *header=reinterpret_cast<Header *>(aligned)-1;
+    *header={base,size,enabled?generation:0};
+    if(enabled){++allocations;allocated_bytes+=size;live_bytes+=size;peak_bytes=std::max(peak_bytes,live_bytes);}
+    return reinterpret_cast<void *>(aligned);
+}
+void release(void *value) noexcept {
+    if(!value)return;
+    auto *header=static_cast<Header *>(value)-1;
+    if(header->generation==generation)live_bytes-=header->size;
+    std::free(header->base);
+}
+#endif
+void reset() {
+    if(live_bytes!=0){std::cerr<<"Tracked production allocation survived engine teardown\n";std::exit(2);}
+    ++generation;allocations=allocated_bytes=live_bytes=peak_bytes=0;
+}
+}
+#if DF_MOTION_ALLOCATION_COUNTS
+void *operator new(size_t size){return allocation_probe::allocate(size,alignof(std::max_align_t));}
+void *operator new[](size_t size){return ::operator new(size);}
+void operator delete(void *value)noexcept{allocation_probe::release(value);}
+void operator delete[](void *value)noexcept{allocation_probe::release(value);}
+void operator delete(void *value,size_t)noexcept{allocation_probe::release(value);}
+void operator delete[](void *value,size_t)noexcept{allocation_probe::release(value);}
+void *operator new(size_t size,std::align_val_t alignment){return allocation_probe::allocate(size,size_t(alignment));}
+void *operator new[](size_t size,std::align_val_t alignment){return ::operator new(size,alignment);}
+void operator delete(void *value,std::align_val_t)noexcept{allocation_probe::release(value);}
+void operator delete[](void *value,std::align_val_t)noexcept{allocation_probe::release(value);}
+void operator delete(void *value,size_t,std::align_val_t)noexcept{allocation_probe::release(value);}
+void operator delete[](void *value,size_t,std::align_val_t)noexcept{allocation_probe::release(value);}
+#endif
+
+struct SDL_Texture { int unused=0; };
+std::array<SDL_Texture,4096> textures;
+struct Renderer { uint64_t texture_calls=0,texture_hash=0xcbf29ce484222325ULL; };
+enum class Workload { idle,paused,small,dense,frequent,invalidation };
+constexpr std::array<const char *,6> workload_names={"idle","paused","small_moving","dense_200","frequent_changes","pan_context"};
+struct Fixture {
+    int32_t dim_x=100,dim_y=60,clipx[2]{0,99},clipy[2]{0,59},pan_x=0,pan_y=0;
+    uint64_t revision=1;
+    std::array<std::vector<int32_t>,9> now,old;
+    std::vector<int32_t> background,background_old;
+    std::vector<uint8_t> fire;
+    int32_t *screentexpos_old=nullptr;
+    int entity_count=0,phase=0;
+    size_t index(int x,int y)const{return size_t(x*dim_y+y);}
+    void draw() {
+        for(auto &layer:now)std::fill(layer.begin(),layer.end(),0);
+        for(int entity=0;entity<entity_count;++entity) {
+            int x=2+(entity%23)*4+(phase&1),y=2+(entity/23)*4,texture=10+entity*8;
+            now[1][index(x,y)]=texture;
+            now[0][index(x+1,y)]=texture+1;
+            now[2][index(x-1,y)]=texture+2;
+            now[4][index(x,y-1)]=texture+3;
+            now[7][index(x,y)]=texture+4;
+            now[8][index(x,y)]=texture+5;
+            if(entity%10==0)now[6][index(x,y+1)]=texture+6+(phase&1);
+        }
+    }
+    void snapshot() {old=now;background_old=background;screentexpos_old=old[1].data();}
+    void initialize(Workload workload) {
+        entity_count=workload==Workload::idle?0:workload==Workload::small?10:
+                     workload==Workload::invalidation?50:200;
+        for(auto &layer:now)layer.assign(size_t(dim_x*dim_y),0);
+        background.resize(size_t(dim_x*dim_y));
+        for(size_t i=0;i<background.size();++i)background[i]=2000+int32_t(i);
+        fire.assign(background.size(),0);draw();snapshot();
+    }
+    void advance(Workload workload,int step) {
+        // Construct/copy all simulated DF buffers before production timing begins.
+        if(workload==Workload::idle||workload==Workload::paused)return;
+        if(workload==Workload::invalidation) {
+            snapshot();
+            if(step%12==1)++pan_x;
+            if(step%12==2) {
+                for(int x=0;x<dim_x;++x)for(int y=0;y<dim_y;++y) {
+                    const size_t to=index(x,y);bool inside=x+1<dim_x;
+                    for(size_t layer=0;layer<now.size();++layer)
+                        now[layer][to]=inside?old[layer][index(x+1,y)]:0;
+                    background[to]=inside?background_old[index(x+1,y)]:9000+int32_t(to);
+                }
+            }
+            if(step%12==6){++revision;++phase;draw();}
+            return;
+        }
+        snapshot();
+        if(workload==Workload::frequent||step%6==0){++phase;draw();}
+    }
+};
+
+// INSERT_PRODUCTION_NAMESPACES_HERE
+
+using Clock=std::chrono::steady_clock;
+struct Sample {
+    int frame=0,batch=0;
+    uint64_t sync_ns=0,collector_ns=0,coverage_ns=0,cleanup_ns=0;
+    std::array<uint64_t,4> phase_allocations{},phase_allocated_bytes{};
+    uint64_t allocations=0,allocated_bytes=0,retained_bytes=0,peak_live_bytes=0;
+    uint64_t proxies=0,moving_proxies=0,mirrored_proxies=0,texture_calls=0,covered_tiles=0;
+    uint64_t checksum=0;
+};
+uint64_t mix(uint64_t hash,uint64_t value){return (hash^value)*0x100000001b3ULL;}
+uint32_t float_bits(float value){uint32_t out;std::memcpy(&out,&value,sizeof(out));return out;}
+template<class Callback> uint64_t measure(Callback callback,uint64_t &allocation_count,uint64_t &allocated_bytes) {
+    const auto allocation_start=allocation_probe::allocations,bytes_start=allocation_probe::allocated_bytes;
+    allocation_probe::enabled=true;
+    const auto start=Clock::now();callback();const auto end=Clock::now();
+    allocation_probe::enabled=false;
+    allocation_count=allocation_probe::allocations-allocation_start;
+    allocated_bytes=allocation_probe::allocated_bytes-bytes_start;
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end-start).count());
+}
+template<class Engine> std::vector<Sample> trial(Workload workload,int viewports,int warmup,int batches,int batch_frames) {
+    Engine::reset();allocation_probe::reset();
+    std::vector<Fixture> fixtures(size_t(viewports),Fixture{});
+    for(auto &fixture:fixtures)fixture.initialize(workload);
+    std::vector<Renderer> renderers(size_t(viewports),Renderer{});
+    std::vector<std::optional<typename Engine::Proxies>> proxies(size_t(viewports),std::nullopt);
+    std::vector<std::optional<typename Engine::Coverage>> coverage(size_t(viewports),std::nullopt);
+    std::vector<Sample> samples(size_t(batches*batch_frames),Sample{});
+    uint32_t time=1000;
+    for(int frame=-warmup;frame<batches*batch_frames;++frame) {
+        int step=frame+warmup;
+        for(auto &fixture:fixtures)fixture.advance(workload,step);
+        // The paused case repeats one timestamp throughout; other cases sample 250 Hz.
+        if(workload!=Workload::paused)time+=4;
+        const auto allocation_start=allocation_probe::allocations;
+        const auto bytes_start=allocation_probe::allocated_bytes;
+        allocation_probe::peak_bytes=allocation_probe::live_bytes;
+        Sample sample;sample.frame=frame;sample.batch=frame<0?-1:frame/batch_frames;
+        sample.sync_ns=measure([&]{Engine::begin(time);for(auto &fixture:fixtures)Engine::synchronize(fixture);Engine::end();},
+                              sample.phase_allocations[0],sample.phase_allocated_bytes[0]);
+        sample.collector_ns=measure([&]{for(int viewport=0;viewport<viewports;++viewport)
+            proxies[size_t(viewport)].emplace(Engine::proxies(renderers[size_t(viewport)],fixtures[size_t(viewport)]));},
+            sample.phase_allocations[1],sample.phase_allocated_bytes[1]);
+        sample.coverage_ns=measure([&]{for(int viewport=0;viewport<viewports;++viewport)
+            coverage[size_t(viewport)].emplace(Engine::coverage(*proxies[size_t(viewport)],fixtures[size_t(viewport)].dim_y));},
+            sample.phase_allocations[2],sample.phase_allocated_bytes[2]);
+        // Complete output digest and operation counts are consumed outside timed regions.
+        uint64_t hash=0xcbf29ce484222325ULL;
+        for(int viewport=0;viewport<viewports;++viewport) {
+            auto &renderer=renderers[size_t(viewport)];sample.texture_calls+=renderer.texture_calls;
+            hash=mix(hash,renderer.texture_hash);renderer={};
+            for(const auto &proxy:*proxies[size_t(viewport)]) {
+                ++sample.proxies;sample.moving_proxies+=proxy.movement_id!=0;sample.mirrored_proxies+=proxy.mirrored;
+                hash=mix(hash,uint8_t(proxy.layer));hash=mix(hash,float_bits(proxy.source_x));
+                hash=mix(hash,float_bits(proxy.source_y));hash=mix(hash,uint32_t(proxy.target_x));
+                hash=mix(hash,uint32_t(proxy.target_y));hash=mix(hash,uint32_t(proxy.texpos));
+                hash=mix(hash,float_bits(proxy.progress));hash=mix(hash,proxy.mirrored);
+                hash=mix(hash,uint32_t(proxy.mirror_shift));hash=mix(hash,proxy.movement_id);
+                for(const auto &tile:proxy.coverage){hash=mix(hash,uint32_t(tile.first));hash=mix(hash,uint32_t(tile.second));}
+            }
+            const auto &covered=*coverage[size_t(viewport)];sample.covered_tiles+=covered.all.size();
+            for(const auto &tile:covered.all){hash=mix(hash,uint32_t(tile.first));hash=mix(hash,uint32_t(tile.second));}
+            for(const auto &group:covered.groups)for(const auto &tile:group){hash=mix(hash,uint32_t(tile.first));hash=mix(hash,uint32_t(tile.second));}
+            for(const auto &entry:covered.selected){hash=mix(hash,uint32_t(entry.first));hash=mix(hash,entry.second);}
+        }
+        sample.checksum=hash;
+        sample.cleanup_ns=measure([&]{for(auto &item:proxies)item.reset();for(auto &item:coverage)item.reset();},
+                                 sample.phase_allocations[3],sample.phase_allocated_bytes[3]);
+        sample.allocations=allocation_probe::allocations-allocation_start;
+        sample.allocated_bytes=allocation_probe::allocated_bytes-bytes_start;
+        sample.retained_bytes=allocation_probe::live_bytes;sample.peak_live_bytes=allocation_probe::peak_bytes;
+        if(frame>=0)samples[size_t(frame)]=sample;
+    }
+    Engine::reset();
+    proxies.clear();coverage.clear();allocation_probe::reset();
+    return samples;
+}
+void output(const char *engine,Workload workload,int viewports,int iteration,int order,const std::vector<Sample> &samples) {
+    for(const auto &s:samples) {
+        std::cout<<engine<<','<<workload_names[size_t(workload)]<<','<<viewports<<','
+        <<iteration<<','<<order<<','<<s.batch<<','<<s.frame<<','<<s.sync_ns<<','<<s.collector_ns<<','
+        <<s.coverage_ns<<','<<s.cleanup_ns<<','<<(s.sync_ns+s.collector_ns+s.coverage_ns+s.cleanup_ns)<<','
+        <<s.allocations<<','<<s.allocated_bytes;
+        for(size_t phase=0;phase<s.phase_allocations.size();++phase)
+            std::cout<<','<<s.phase_allocations[phase]<<','<<s.phase_allocated_bytes[phase];
+        std::cout<<','<<s.retained_bytes<<','<<s.peak_live_bytes<<','
+        <<s.proxies<<','<<s.moving_proxies<<','<<s.mirrored_proxies<<','<<s.texture_calls<<','<<s.covered_tiles<<','<<s.checksum<<'\n';
+    }
+}
+int positive(const char *value,int maximum) {
+    char *end=nullptr;long result=std::strtol(value,&end,10);
+    if(!end||*end||result<1||result>maximum){std::cerr<<"Invalid bounded benchmark argument\n";std::exit(2);}
+    return int(result);
+}
+int main(int argc,char **argv) {
+    if(argc!=5&&argc!=7){std::cerr<<"Usage: benchmark <trials 1..20> <warmup 1..1000> <batches 1..100> <batch-frames 1..1000> [workload-name|all 1|9|all]\n";return 2;}
+    int trials=positive(argv[1],20),warmup=positive(argv[2],1000),batches=positive(argv[3],100),batch_frames=positive(argv[4],1000);
+    const std::string workload_filter=argc==7?argv[5]:"all",viewport_filter=argc==7?argv[6]:"all";
+    if(workload_filter!="all"&&std::find(workload_names.begin(),workload_names.end(),workload_filter)==workload_names.end()) {
+        std::cerr<<"Unknown workload filter\n";return 2;
+    }
+    if(viewport_filter!="all"&&viewport_filter!="1"&&viewport_filter!="9") {
+        std::cerr<<"Viewport filter must be 1, 9, or all\n";return 2;
+    }
+    std::cout<<"engine,workload,viewports,trial,order,batch,frame,sync_ns,collector_ns,coverage_ns,cleanup_ns,total_ns,allocations,allocated_bytes,sync_allocations,sync_allocated_bytes,collector_allocations,collector_allocated_bytes,coverage_allocations,coverage_allocated_bytes,cleanup_allocations,cleanup_allocated_bytes,retained_bytes,peak_live_bytes,proxies,moving_proxies,mirrored_proxies,texture_calls,covered_tiles,checksum\n";
+    for(int iteration=0;iteration<trials;++iteration)for(int v:{1,9})for(size_t w=0;w<workload_names.size();++w) {
+        if(viewport_filter!="all"&&viewport_filter!=(v==1?"1":"9"))continue;
+        if(workload_filter!="all"&&workload_filter!=workload_names[w])continue;
+        auto workload=Workload(w);
+        // Alternate AB/BA within each workload and reverse by viewport/workload to limit order bias.
+        bool baseline_first=((iteration+int(w)+(v==9))&1)==0;
+        std::vector<Sample> a,b;
+        if(baseline_first){a=trial<baseline::Engine>(workload,v,warmup,batches,batch_frames);b=trial<candidate::Engine>(workload,v,warmup,batches,batch_frames);}
+        else{b=trial<candidate::Engine>(workload,v,warmup,batches,batch_frames);a=trial<baseline::Engine>(workload,v,warmup,batches,batch_frames);}
+        for(size_t frame=0;frame<a.size();++frame)if(a[frame].checksum!=b[frame].checksum||a[frame].proxies!=b[frame].proxies||
+            a[frame].texture_calls!=b[frame].texture_calls||a[frame].covered_tiles!=b[frame].covered_tiles) {
+            std::cerr<<"Performance fixture output mismatch workload="<<workload_names[w]<<" viewports="<<v<<" trial="<<iteration<<" frame="<<frame<<'\n';return 3;
+        }
+        output("baseline",workload,v,iteration,baseline_first?0:1,a);output("candidate",workload,v,iteration,baseline_first?1:0,b);
+    }
+    return 0;
+}

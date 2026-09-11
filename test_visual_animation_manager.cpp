@@ -396,10 +396,130 @@ void test_index_cancel_and_discard()
 	assert(candidates.empty());
 }
 
+// Observe exact-buffer refresh through public movement IDs: retaining one center
+// step while another tracked value changes registers exactly one additional step.
+struct exact_buffer_fixturest
+{
+	static constexpr int32_t dim=4;
+	int token=0;
+	std::array<std::array<int32_t,dim*dim>,9> current{},previous{};
+	std::array<int32_t,dim*dim> background{},background_old{};
+	visual_animation_managerst manager;
+	viewport_visual_animation_inputst input;
+	uint32_t now=1016;
+	visual_movement_idst last_id=0;
+
+	explicit exact_buffer_fixturest(bool linear=false)
+		{
+		manager.set_linear(linear);
+		input=make_input(&token,dim,current[0].data());
+		for(size_t layer=0;layer<current.size();++layer)
+			set_layer(input,static_cast<viewport_visual_layer>(layer),
+				current[layer].data(),previous[layer].data());
+		current[1][5]=11;
+		run_frame(manager,input,1000);
+		previous[1]=current[1];current[1][5]=0;current[1][9]=11;
+		run_frame(manager,input,now);
+		const auto movement=manager.get_movement(&token,viewport_visual_layer::center,2,1);
+		assert(movement.active);
+		last_id=movement.movement_id;
+		}
+
+	void expect_refresh(bool changed)
+		{
+		if(changed)++last_id;
+		run_frame(manager,input,++now);
+		assert(manager.get_follow(&token,last_id).active);
+		assert(!manager.get_follow(&token,last_id+1).active);
+		}
+};
+
+void test_exact_buffer_content_and_refresh()
+{
+	for(bool linear:{false,true})
+		{
+		exact_buffer_fixturest fixture(linear);
+		fixture.expect_refresh(false);
+		for(size_t layer:{size_t(1),size_t(6),size_t(7),size_t(8)})
+			{
+			// Current and previous buffers each matter, including their final element.
+			fixture.current[layer].back()=101+int32_t(layer);
+			fixture.expect_refresh(true);
+			fixture.expect_refresh(false); // successful refresh must replace the saved bytes
+			fixture.previous[layer].back()=201+int32_t(layer);
+			fixture.expect_refresh(true);
+			fixture.expect_refresh(false);
+			}
+		fixture.current[0].back()=77; // untracked creature fragment: same baseline semantics
+		fixture.previous[5].back()=88;
+		fixture.expect_refresh(false);
+		// Different storage with identical contents must still compare equal.
+		auto relocated_current=fixture.current,relocated_previous=fixture.previous;
+		for(size_t layer=0;layer<fixture.current.size();++layer)
+			set_layer(fixture.input,static_cast<viewport_visual_layer>(layer),
+				relocated_current[layer].data(),relocated_previous[layer].data());
+		fixture.expect_refresh(false);
+		// Mutate through those same pointers; pointer identity cannot substitute for bytes.
+		relocated_current[6].front()=309;
+		fixture.expect_refresh(true);
+		fixture.expect_refresh(false);
+		}
+}
+
+void test_exact_buffer_background_presence()
+{
+	exact_buffer_fixturest fixture;
+	fill_background(fixture.background,1000);
+	fixture.background_old=fixture.background;
+	fixture.input.current_background=fixture.background.data();
+	fixture.expect_refresh(false); // one missing half means backgrounds are unavailable
+	fixture.input.previous_background=fixture.background_old.data();
+	fixture.expect_refresh(true);
+	fixture.expect_refresh(false);
+	++fixture.background.back();fixture.expect_refresh(true);fixture.expect_refresh(false);
+	++fixture.background_old.back();fixture.expect_refresh(true);fixture.expect_refresh(false);
+	fixture.input.current_background=nullptr;fixture.input.previous_background=nullptr;
+	fixture.expect_refresh(true);
+	fixture.input.previous_background=fixture.background_old.data();
+	fixture.expect_refresh(false);
+	fixture.input.current_background=fixture.background.data();
+	fixture.expect_refresh(true);
+	fixture.expect_refresh(false);
+}
+
+void test_exact_buffer_idle_and_invalidation()
+{
+	for(bool linear:{false,true})
+		{
+		exact_buffer_fixturest fixture(linear);
+		const auto first=fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,2,1);
+		run_frame(fixture.manager,fixture.input,1066);
+		const auto idle=fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,2,1);
+		assert(idle.active&&idle.movement_id==first.movement_id&&idle.progress>first.progress);
+		assert(!fixture.manager.get_follow(&fixture.token,first.movement_id+1).active);
+		fixture.manager.cancel_transitions();
+		run_frame(fixture.manager,fixture.input,1070);
+		assert(!fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,2,1).active);
+		auto invalid=fixture.input;invalid.current[0]=nullptr;
+		run_frame(fixture.manager,invalid,1071);
+		run_frame(fixture.manager,fixture.input,1072); // first valid context is reset, not animated
+		assert(!fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,2,1).active);
+		fixture.current[6].back()=75;
+		run_frame(fixture.manager,fixture.input,1073);
+		assert(fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,2,1).active);
+		fixture.input.dim_x=2;fixture.input.dim_y=8; // equal area, different layout
+		run_frame(fixture.manager,fixture.input,1074);
+		assert(!fixture.manager.get_movement(&fixture.token,viewport_visual_layer::center,1,1).active);
+		}
+}
+
 } // namespace
 
 int main()
 {
+	test_exact_buffer_content_and_refresh();
+	test_exact_buffer_background_presence();
+	test_exact_buffer_idle_and_invalidation();
 	test_equal_motion_companion_identity();
 	test_index_cancel_and_discard();
 	test_foreign_predecessor_history();
