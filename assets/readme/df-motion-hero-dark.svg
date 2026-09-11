@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="500" viewBox="0 0 1600 500" role="img" aria-labelledby="title desc">
+  <title id="title">DF Motion</title>
+  <desc id="desc">An abstract obsidian and copper fortress grid with cyan motion trails, representing Dwarf Fortress movement between simulation ticks.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080d13"/>
+      <stop offset="0.55" stop-color="#101c27"/>
+      <stop offset="1" stop-color="#071116"/>
+    </linearGradient>
+    <linearGradient id="copper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f2bb78"/>
+      <stop offset="0.5" stop-color="#c7794e"/>
+      <stop offset="1" stop-color="#743a35"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#45e1e4" stop-opacity="0"/>
+      <stop offset="0.55" stop-color="#45e1e4" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#c4ffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#9be5e4" stroke-opacity=".08"/>
+      <circle cx="1" cy="1" r="1.3" fill="#9be5e4" fill-opacity=".2"/>
+    </pattern>
+  </defs>
+  <rect width="1600" height="500" rx="28" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1598" height="498" rx="27" fill="url(#grid)" stroke="#d49667" stroke-opacity=".28" stroke-width="2"/>
+  <path d="M-30 382L240 115 462 338 711 81 944 318 1168 92 1630 410" fill="none" stroke="url(#cyan)" stroke-width="8" filter="url(#glow)"/>
+  <path d="M-30 382L240 115 462 338 711 81 944 318 1168 92 1630 410" fill="none" stroke="#b8ffff" stroke-opacity=".62" stroke-width="2"/>
+  <g fill="#0c151d" stroke="url(#copper)" stroke-width="3">
+    <path d="M115 340V226l74-74 74 74v114Z"/>
+    <path d="M172 340V253h34v87Z" fill="#bd754d"/>
+    <path d="M614 360V216l84-84 84 84v144Z"/>
+    <path d="M676 360V253h44v107Z" fill="#bd754d"/>
+    <path d="M1089 357V241l76-76 76 76v116Z"/>
+    <path d="M1142 357V270h46v87Z" fill="#bd754d"/>
+  </g>
+  <g fill="#d8ffff" filter="url(#glow)">
+    <circle cx="240" cy="115" r="7"/><circle cx="462" cy="338" r="6"/>
+    <circle cx="711" cy="81" r="8"/><circle cx="944" cy="318" r="6"/>
+    <circle cx="1168" cy="92" r="7"/>
+  </g>
+  <g fill="#dffefe" font-family="Segoe UI, Arial, sans-serif">
+    <text x="106" y="118" font-size="23" letter-spacing="7" fill="#9de7e5">DFHACK / PRESENTATION LAYER</text>
+    <text x="100" y="236" font-size="102" font-weight="700" letter-spacing="9">DF MOTION</text>
+    <text x="108" y="294" font-size="28" letter-spacing="3" fill="#f2bb78">DWARF FORTRESS, BETWEEN THE TICKS.</text>
+  </g>
+  <g fill="#9de7e5" font-family="Consolas, monospace" font-size="16" opacity=".8">
+    <text x="1110" y="447">SIM AUTHORITY  /  PRESENTATION CONTINUITY</text>
+  </g>
+</svg>
