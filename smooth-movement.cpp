@@ -1027,14 +1027,39 @@ std::vector<render_proxyst> collect_proxies(
 	std::vector<render_proxyst> proxies;
 	auto layers=visual_layers(vp);
 	auto previous_layers=visual_layers(vp,true);
+	// Candidate and accepted-anchor indexes adapted from notliad/df-smooth-movement PR #22.
+	// Restore the full sweep's y-then-x order before visiting movement candidates.
+	std::vector<int32_t> candidate_tiles;
+	animation_manager.active_movement_tiles(vp,candidate_tiles);
+	for(int32_t &tile:candidate_tiles)tile=(tile%vp->dim_y)*vp->dim_x+tile/vp->dim_y;
+	std::sort(candidate_tiles.begin(),candidate_tiles.end());
+	candidate_tiles.erase(
+		std::unique(candidate_tiles.begin(),candidate_tiles.end()),candidate_tiles.end());
+	// The center layer is painted first. Only accepted center proxies can own fragments.
+	std::vector<int32_t> center_proxy_at(size_t(vp->dim_x)*size_t(vp->dim_y),-1);
+	const auto anchor_matches=[&](
+		int32_t anchor_x,int32_t anchor_y,int32_t x,int32_t y,
+		viewport_visual_layer layer,const visual_movement_renderst &movement)
+		{
+		if(anchor_x<0||anchor_x>=vp->dim_x||anchor_y<0||anchor_y>=vp->dim_y)return false;
+		const int32_t proxy_index=center_proxy_at[size_t(anchor_x*vp->dim_y+anchor_y)];
+		if(proxy_index<0)return false;
+		const render_proxyst &anchor=proxies[size_t(proxy_index)];
+		if(layer!=viewport_visual_layer::designation)
+			return anchor.movement_id==movement.movement_id;
+		return anchor.source_x-anchor.target_x==movement.source_x-x&&
+			anchor.source_y-anchor.target_y==movement.source_y-y&&
+			anchor.progress==movement.progress;
+		};
 	for(uint8_t draw_order=0;draw_order<visual_layer_count;++draw_order)
 		{
 		const viewport_visual_layer visual_layer=visual_layer_at_draw_order(draw_order);
 		const size_t layer=static_cast<size_t>(visual_layer);
-		for(int32_t y=0;y<vp->dim_y;++y)
+		for(const int32_t row_tile:candidate_tiles)
 			{
-			for(int32_t x=0;x<vp->dim_x;++x)
 				{
+				const int32_t x=row_tile%vp->dim_x;
+				const int32_t y=row_tile/vp->dim_x;
 				const int32_t index=x*vp->dim_y+y;
 				const int32_t texpos=layers[layer][index];
 				if(texpos==0)continue;
@@ -1051,17 +1076,9 @@ std::vector<render_proxyst> collect_proxies(
 				if(!visual_layer_moves_independently(visual_layer))
 					{
 					bool anchored=false;
-					for(const render_proxyst &anchor:proxies)
-						{
-						if(anchor.layer==viewport_visual_layer::center&&
-							std::abs(anchor.target_x-x)<=1&&
-							std::abs(anchor.target_y-y)<=1&&
-							(visual_layer!=viewport_visual_layer::designation?
-							anchor.movement_id==movement.movement_id:
-							(anchor.source_x-anchor.target_x==movement.source_x-x&&
-							anchor.source_y-anchor.target_y==movement.source_y-y&&
-							anchor.progress==movement.progress)))anchored=true;
-						}
+					for(int32_t dx=-1;dx<=1&&!anchored;++dx)
+						for(int32_t dy=-1;dy<=1&&!anchored;++dy)
+							anchored=anchor_matches(x+dx,y+dy,x,y,visual_layer,movement);
 					if(!anchored)continue;
 					}
 					if((visual_layer==viewport_visual_layer::item||
@@ -1089,14 +1106,10 @@ std::vector<render_proxyst> collect_proxies(
 							inherited_source_x*vp->dim_y+inherited_source_y,index);
 					if(!fragment_moved)
 						{
-					const auto &descriptor=visual_layer_descriptor(visual_layer);
-					bool owns_fragment=false;
-					for(const render_proxyst &anchor:proxies)
-						if(anchor.layer==viewport_visual_layer::center&&
-							anchor.target_x==x+descriptor.center_x&&
-							anchor.target_y==y+descriptor.center_y&&
-							anchor.movement_id==movement.movement_id)owns_fragment=true;
-					if(!owns_fragment)continue;
+						const auto &descriptor=visual_layer_descriptor(visual_layer);
+						if(!anchor_matches(
+							x+descriptor.center_x,y+descriptor.center_y,x,y,
+							visual_layer,movement))continue;
 						}
 					}
 
@@ -1188,6 +1201,8 @@ std::vector<render_proxyst> collect_proxies(
 				if(proxy.texture==nullptr)continue;
 				proxy.movement_id=movement.movement_id;
 				proxies.push_back(std::move(proxy));
+				if(visual_layer==viewport_visual_layer::center)
+					center_proxy_at[size_t(index)]=int32_t(proxies.size()-1);
 				}
 			}
 		}
@@ -1197,12 +1212,17 @@ std::vector<render_proxyst> collect_proxies(
 	// A fragment's tile is its anchor minus the layer's centre offset, inverting the moving path.
 	if(flip_enabled)
 		{
-		for(int32_t anchor_x=0;anchor_x<vp->dim_x;++anchor_x)
+		std::set<std::pair<uint8_t,int32_t>> drawn;
+		for(const render_proxyst &existing:proxies)
+			drawn.emplace(
+				static_cast<uint8_t>(existing.layer),
+				existing.target_x*vp->dim_y+existing.target_y);
+		// Storage-index order preserves the stationary pass's x-then-y anchor order.
+		for(const int32_t anchor_index:animation_manager.mirrored_tiles(vp))
 			{
-			for(int32_t anchor_y=0;anchor_y<vp->dim_y;++anchor_y)
 				{
-				if(animation_manager.get_facing(vp,anchor_x,anchor_y)==
-					native_sprite_facing)continue;
+				const int32_t anchor_x=anchor_index/vp->dim_y;
+				const int32_t anchor_y=anchor_index%vp->dim_y;
 				for(uint8_t draw_order=0;draw_order<visual_layer_count;++draw_order)
 					{
 					const viewport_visual_layer visual_layer=
@@ -1218,12 +1238,8 @@ std::vector<render_proxyst> collect_proxies(
 					const size_t layer=static_cast<size_t>(visual_layer);
 					const int32_t texpos=layers[layer][x*vp->dim_y+y];
 					if(texpos==0)continue;
-					bool already_drawn=false;
-					for(const render_proxyst &existing:proxies)
-						if(existing.layer==visual_layer&&
-							existing.target_x==x&&existing.target_y==y)
-							already_drawn=true;
-					if(already_drawn)continue;
+					if(drawn.count({static_cast<uint8_t>(visual_layer),x*vp->dim_y+y}))
+						continue;
 
 					// source == target at progress 1.0 draws in place, moved only by mirror_shift.
 					render_proxyst proxy=
@@ -1262,6 +1278,7 @@ std::vector<render_proxyst> collect_proxies(
 					proxy.texture=cached_texture(renderer,texpos);
 					if(proxy.texture==nullptr)continue;
 					proxies.push_back(std::move(proxy));
+					drawn.emplace(static_cast<uint8_t>(visual_layer),x*vp->dim_y+y);
 					}
 				}
 			}

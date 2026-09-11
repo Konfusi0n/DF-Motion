@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: MIT
+// Deterministic fixture adapters; collector/manager implementations are injected unchanged.
+struct SDL_Texture { int unused=0; };
+std::array<SDL_Texture,4096> textures;
+struct Fixture {
+    int32_t dim_x=0,dim_y=0,clipx[2]{},clipy[2]{},pan_x=0,pan_y=0;
+    uint64_t revision=1;
+    std::array<std::vector<int32_t>,9> now,old;
+    std::vector<int32_t> background,background_old;
+    std::vector<uint8_t> fire;
+    std::set<int32_t> missing;
+    int32_t *screentexpos_old=nullptr;
+    void resize(int32_t x,int32_t y) {
+        dim_x=x;dim_y=y;clipx[0]=clipy[0]=0;clipx[1]=x-1;clipy[1]=y-1;
+        ++revision;pan_x=pan_y=0;missing.clear();
+        for(auto &v:now)v.assign(size_t(x*y),0);
+        old=now;fire.assign(size_t(x*y),0);
+        background.resize(size_t(x*y));
+        for(size_t i=0;i<background.size();++i)background[i]=1000+int32_t(i);
+        background_old=background;screentexpos_old=old[1].data();
+    }
+    int index(int x,int y)const{return x*dim_y+y;}
+    void snapshot(){old=now;background_old=background;screentexpos_old=old[1].data();}
+    void shift(int dx,int dy) {
+        snapshot();
+        for(int x=0;x<dim_x;++x)for(int y=0;y<dim_y;++y) {
+            int sx=x+dx,sy=y+dy,i=index(x,y);
+            bool inside=sx>=0&&sx<dim_x&&sy>=0&&sy<dim_y;
+            for(size_t l=0;l<9;++l)now[l][size_t(i)]=inside?old[l][size_t(index(sx,sy))]:0;
+            background[size_t(i)]=inside?background_old[size_t(index(sx,sy))]:2000+i;
+        }
+    }
+};
+struct Renderer { Fixture *fixture; std::vector<int32_t> calls; };
+uint32_t trace_seed=0,trace_step=0;
+uint64_t lookup_checks=0,collector_checks=0,index_checks=0,proxy_checks=0,moving_proxies=0,resting_mirrors=0;
+uint64_t trace_fingerprint=0xcbf29ce484222325ULL;
+void require(bool ok,const char *label) {
+    if(!ok) { std::cerr<<"FAIL seed="<<trace_seed<<" step="<<trace_step<<" "<<label<<"\n"; std::exit(1); }
+}
+uint32_t random_next(uint32_t &state) {state^=state<<13;state^=state>>17;state^=state<<5;return state;}
+
+// INSERT_PRODUCTION_NAMESPACES_HERE
+
+template<class A,class B> void same_movement(const A&a,const B&b) {
+    require(a.active==b.active&&a.inherited==b.inherited&&a.movement_id==b.movement_id&&
+        a.source_x==b.source_x&&a.source_y==b.source_y&&a.progress==b.progress,"movement fields/ID");
+    require(std::isfinite(a.source_x)&&std::isfinite(a.source_y)&&std::isfinite(a.progress),"finite movement");
+    ++lookup_checks;
+}
+void check(Fixture &f,bool collect=true,bool sparse=true) {
+    auto &a=baseline::animation_manager;auto &b=candidate::animation_manager;
+    require(a.get_frame_time_ms()==b.get_frame_time_ms()&&a.get_frame_delta_ms()==b.get_frame_delta_ms(),"clock");
+    require(a.requires_full_redraw()==b.requires_full_redraw(),"redraw");
+    auto sa=a.get_scroll(&f);auto sb=b.get_scroll(&f);
+    require(sa.pending==sb.pending&&sa.landed==sb.landed&&sa.abandoned==sb.abandoned&&
+        sa.landed_x==sb.landed_x&&sa.landed_y==sb.landed_y&&sa.pending_x==sb.pending_x&&
+        sa.pending_y==sb.pending_y&&sa.follow_candidate==sb.follow_candidate,"scroll");
+    for(int x=-1;x<=f.dim_x;++x)for(int y=-1;y<=f.dim_y;++y) {
+        require(int(a.get_facing(&f,x,y))==int(b.get_facing(&f,x,y)),"facing");
+        for(int l=0;l<9;++l) {
+            auto ma=a.get_movement(&f,baseline::viewport_visual_layer(l),x,y);
+            auto mb=b.get_movement(&f,candidate::viewport_visual_layer(l),x,y);
+            same_movement(ma,mb);
+            if(ma.active) {
+                auto fa=a.get_follow(&f,ma.movement_id);auto fb=b.get_follow(&f,mb.movement_id);
+                require(fa.active==fb.active&&fa.movement_id==fb.movement_id&&
+                    fa.offset_x==fb.offset_x&&fa.offset_y==fb.offset_y,"follow");
+            }
+        }
+    }
+    require(a.has_mirrored_facing(&f)==b.has_mirrored_facing(&f),"mirrored flag");
+#if HAS_INDEX_API
+    if(sparse) {
+    std::vector<int32_t> tiles{-12345};b.active_movement_tiles(&f,tiles);
+    require(!tiles.empty()&&tiles[0]==-12345,"candidate append contract");tiles.erase(tiles.begin());
+    for(int tile:tiles)require(tile>=0&&tile<f.dim_x*f.dim_y,"candidate bounds");
+    std::sort(tiles.begin(),tiles.end());tiles.erase(std::unique(tiles.begin(),tiles.end()),tiles.end());
+    std::vector<int32_t> mirrors;
+    for(int x=0;x<f.dim_x;++x)for(int y=0;y<f.dim_y;++y) {
+        if(a.get_facing(&f,x,y)!=baseline::native_sprite_facing)mirrors.push_back(f.index(x,y));
+        for(int l=0;l<9;++l)if(a.get_movement(&f,baseline::viewport_visual_layer(l),x,y).active)
+            require(std::binary_search(tiles.begin(),tiles.end(),f.index(x,y)),"candidate completeness");
+    }
+    require(mirrors==b.mirrored_tiles(&f),"mirrored list exact order");
+    ++index_checks;
+    }
+#endif
+    if(!collect)return;
+    Renderer ra{&f,{}},rb{&f,{}};
+    auto pa=baseline::collect_proxies(&ra,&f);auto pb=candidate::collect_proxies(&rb,&f);
+    require(pa.size()==pb.size(),"proxy count");
+    for(size_t i=0;i<pa.size();++i) {
+        const auto &x=pa[i];const auto &y=pb[i];
+        require(int(x.layer)==int(y.layer)&&x.source_x==y.source_x&&x.source_y==y.source_y&&
+            x.target_x==y.target_x&&x.target_y==y.target_y&&x.texpos==y.texpos&&
+            x.progress==y.progress&&x.texture==y.texture&&x.mirrored==y.mirrored&&
+            x.mirror_shift==y.mirror_shift&&x.movement_id==y.movement_id&&x.coverage==y.coverage,
+            "ordered proxy fields/coverage");
+        ++proxy_checks;
+        if(x.movement_id!=0)++moving_proxies;
+        if(x.mirrored&&x.movement_id==0)++resting_mirrors;
+    }
+    require(ra.calls==rb.calls,"texture call order");
+    auto ca=baseline::collect_coverage(pa,f.dim_y);auto cb=candidate::collect_coverage(pb,f.dim_y);
+    require(ca.all==cb.all&&ca.groups==cb.groups&&ca.selected==cb.selected,"aggregate coverage");
+    ++collector_checks;
+}
+void reset_pair(bool linear) {
+    baseline::animation_manager={};candidate::animation_manager={};
+    baseline::animation_manager.set_linear(linear);candidate::animation_manager.set_linear(linear);
+    baseline::flip_enabled=candidate::flip_enabled=true;
+}
+void frame(Fixture &f,uint32_t time,bool invalid=false) {
+    const auto record=[](uint64_t value){trace_fingerprint=(trace_fingerprint^value)*0x100000001b3ULL;};
+    record(trace_seed);record(trace_step);record(time);record(uint32_t(f.dim_x));record(uint32_t(f.dim_y));
+    record(f.revision);record(uint32_t(f.pan_x));record(uint32_t(f.pan_y));record(invalid);
+    record(baseline::animation_manager.is_linear());record(baseline::flip_enabled);
+    for(int value:f.clipx)record(uint32_t(value));for(int value:f.clipy)record(uint32_t(value));
+    for(const auto &layer:f.now)for(int value:layer)record(uint32_t(value));
+    for(const auto &layer:f.old)for(int value:layer)record(uint32_t(value));
+    for(int value:f.background)record(uint32_t(value));for(int value:f.background_old)record(uint32_t(value));
+    for(uint8_t value:f.fire)record(value);for(int value:f.missing)record(uint32_t(value));
+    baseline::animation_manager.begin_frame(time);candidate::animation_manager.begin_frame(time);
+    check(f,false,false);
+    baseline::sync(f,invalid);candidate::sync(f,invalid);
+    baseline::animation_manager.end_frame();candidate::animation_manager.end_frame();
+    check(f,!invalid);
+}
+void cancel(Fixture &f) {
+    baseline::animation_manager.cancel_transitions();candidate::animation_manager.cancel_transitions();check(f);
+}
+void targeted(bool linear) {
+    trace_seed=linear?2:1;trace_step=0;reset_pair(linear);Fixture f;f.resize(6,6);
+    f.now[1][f.index(3,1)]=11;f.now[1][f.index(1,3)]=22;frame(f,1000);
+    f.snapshot();f.now[1][f.index(3,1)]=0;f.now[1][f.index(4,1)]=11;frame(f,1016);
+    auto older=baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::center,4,1);
+    f.snapshot();f.now[1][f.index(1,3)]=0;f.now[1][f.index(2,3)]=22;frame(f,1016);
+    auto inherited=baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::designation,3,2);
+    require(inherited.active&&inherited.movement_id==older.movement_id,"reachable equal-motion oldest-ID fixture");
+    for(int l:{0,2,3,4,5,7,8})for(size_t i=0;i<f.now[l].size();++i)f.now[l][i]=30+l;
+    frame(f,1040);f.missing.insert(11);check(f);f.missing.clear();f.fire[f.index(4,1)]=1;check(f);
+    f.fire.assign(36,0);f.clipx[0]=1;check(f);f.clipx[0]=0;cancel(f);
+    // Exact anchor with a disagreeing adjacent movement, plus populated fragments.
+    reset_pair(linear);f.resize(6,6);f.now[1][f.index(1,2)]=11;f.now[1][f.index(3,2)]=22;frame(f,2000);
+    f.snapshot();f.now[1][f.index(1,2)]=0;f.now[1][f.index(2,2)]=11;
+    f.now[1][f.index(3,2)]=0;f.now[1][f.index(3,1)]=22;f.now[0][f.index(3,2)]=31;frame(f,2016);
+    require(baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::right,3,2).active,"exact anchor fixture");
+    // Historical/active predecessor texture replacement and recovery expiry.
+    f.snapshot();f.now[1][f.index(2,2)]=33;frame(f,2200);f.snapshot();
+    f.now[1][f.index(2,2)]=0;f.now[1][f.index(1,2)]=33;frame(f,2400);frame(f,2475);
+    f.snapshot();++f.pan_x;frame(f,2500);frame(f,4499);frame(f,4500);frame(f,4510);
+    // Landed pan and context/resize discard, including equal-area different shape.
+    ++f.pan_y;frame(f,4520);f.shift(0,1);frame(f,4530);f.snapshot();frame(f,4540);
+    frame(f,4550,true);f.resize(4,9);frame(f,4560);frame(f,4570);f.resize(9,4);frame(f,4580);
+    baseline::animation_manager.begin_frame(4590);candidate::animation_manager.begin_frame(4590);
+    baseline::animation_manager.end_frame();candidate::animation_manager.end_frame();check(f,false);
+    // Public, valid input can register duplicate active center targets: another tracked
+    // buffer changes while current/previous center buffers still describe the same step.
+    reset_pair(linear);f.resize(6,6);f.now[1][f.index(1,2)]=11;frame(f,7000);
+    f.snapshot();f.now[1][f.index(1,2)]=0;f.now[1][f.index(2,2)]=11;frame(f,7016);
+    const auto first=baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::center,2,2);
+    require(first.active,"duplicate-center first active");
+    f.background[0]+=1;frame(f,7032); // intentionally retain the same center previous buffer
+    const auto direct=baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::center,2,2);
+    require(direct.active&&direct.movement_id==first.movement_id,"duplicate-center retains first direct ID");
+    require(baseline::animation_manager.get_follow(&f,first.movement_id+1).active,
+        "duplicate-center second record active through public lookup");
+    require(!baseline::animation_manager.get_movement(&f,baseline::viewport_visual_layer::designation,2,3).active,
+        "duplicate-center differing start times make companions ambiguous");
+}
+void random_trace(uint32_t seed) {
+    trace_seed=seed;trace_step=0;uint32_t rng=seed*0x9e3779b9U+1;bool linear=(seed&1)!=0;
+    reset_pair(linear);Fixture f;f.resize(5+int(seed%4),4+int(seed%3));
+    uint32_t now=seed%7==0?0xfffffff0U:1000U;
+    for(size_t i=0;i<f.now[1].size();++i)if(random_next(rng)%6==0)f.now[1][i]=10+int(i);
+    frame(f,now);
+    for(trace_step=1;trace_step<=160;++trace_step) {
+        now+=std::array<uint32_t,8>{0,4,7,16,33,75,151,2100}[random_next(rng)%8];
+        uint32_t event=random_next(rng)%20;
+        if(event==0) {
+            // Function argument evaluation order differs across compilers. Consume each
+            // PRNG draw in its own statement before assigning it a coordinate meaning.
+            int width=3+int(random_next(rng)%6);
+            int height=3+int(random_next(rng)%5);
+            f.resize(width,height);
+        }
+        else if(event==1) {++f.revision;}
+        else if(event==2) {++f.pan_x;}
+        else if(event==3) {f.shift(1,0);}
+        else if(event==4) {cancel(f);}
+        else if(event==5) {
+            linear=!linear;baseline::animation_manager.set_linear(linear);
+            candidate::animation_manager.set_linear(linear);check(f);
+        } else if(event==6) {
+            baseline::flip_enabled=!baseline::flip_enabled;candidate::flip_enabled=baseline::flip_enabled;
+        } else if(event>7) {
+            f.snapshot();
+            int layer=std::array<int,4>{1,6,7,8}[random_next(rng)%4];
+            for(int n=0;n<3;++n) {
+                int x=int(random_next(rng)%f.dim_x);
+                int y=int(random_next(rng)%f.dim_y);
+                int sx=std::clamp(x+int(random_next(rng)%3)-1,0,f.dim_x-1);
+                int sy=std::clamp(y+int(random_next(rng)%3)-1,0,f.dim_y-1);
+                int from=f.index(sx,sy),to=f.index(x,y);
+                if(f.now[layer][from]&&f.now[layer][to]==0) {
+                    f.now[layer][to]=f.now[layer][from];f.now[layer][from]=0;
+                } else f.now[layer][to]=random_next(rng)%4==0?0:10+int(random_next(rng)%30);
+            }
+            for(int l:{0,2,3,4,5}) {
+                int pos=int(random_next(rng)%f.now[l].size());f.now[l][pos]=random_next(rng)%3==0?0:60+l;
+            }
+        }
+        f.missing.clear();if(random_next(rng)%4==0)f.missing.insert(10+int(random_next(rng)%30));
+        std::fill(f.fire.begin(),f.fire.end(),0);if(random_next(rng)%4==0)f.fire[random_next(rng)%f.fire.size()]=1;
+        f.clipx[0]=random_next(rng)%5==0?1:0;
+        frame(f,now,event==7);
+    }
+}
+int main() {
+    targeted(false);targeted(true);
+    for(uint32_t seed=1;seed<=100;++seed)random_trace(seed);
+    require(moving_proxies>0&&resting_mirrors>0,"nonvacuous moving and resting mirror coverage");
+    std::cout<<"PASS seeds=100 targeted_modes=2 lookup_checks="<<lookup_checks
+        <<" collector_checks="<<collector_checks<<" index_checks="<<index_checks
+        <<" proxy_checks="<<proxy_checks<<" moving_proxies="<<moving_proxies<<" resting_mirrors="<<resting_mirrors
+        <<" trace_fingerprint="<<std::hex<<trace_fingerprint<<std::dec
+        <<" index_api="<<HAS_INDEX_API<<"\n";
+}

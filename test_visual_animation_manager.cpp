@@ -331,10 +331,77 @@ void test_matching_predecessor_continuity()
 			}
 }
 
+void test_equal_motion_companion_identity()
+{
+	constexpr int32_t dim=6;
+	const int token=0;
+	for(bool linear:{false,true})
+		{
+		std::array<int32_t,dim*dim> empty{},initial{},first{},second{};
+		initial[3*dim+1]=11;initial[1*dim+3]=22;
+		first=initial;first[3*dim+1]=0;first[4*dim+1]=11;
+		second=first;second[1*dim+3]=0;second[2*dim+3]=22;
+		visual_animation_managerst manager;manager.set_linear(linear);
+		auto input=make_input(&token,dim,empty.data());
+		set_layer(input,viewport_visual_layer::center,initial.data(),empty.data());
+		run_frame(manager,input,1000);
+		set_layer(input,viewport_visual_layer::center,first.data(),initial.data());
+		run_frame(manager,input,1016);
+		const auto older=manager.get_movement(&token,viewport_visual_layer::center,4,1);
+		set_layer(input,viewport_visual_layer::center,second.data(),first.data());
+		run_frame(manager,input,1016);
+		const auto newer=manager.get_movement(&token,viewport_visual_layer::center,2,3);
+		assert(older.active&&newer.active&&older.movement_id!=newer.movement_id);
+		// Equal timestamps and deltas do not make identities interchangeable. Vector
+		// precedence chooses the older higher-x movement, not the first spatial slot.
+		for(auto layer:{viewport_visual_layer::item,viewport_visual_layer::designation})
+			{
+			const auto inherited=manager.get_movement(&token,layer,3,2);
+			assert(inherited.active&&inherited.inherited&&inherited.movement_id==older.movement_id);
+			assert(inherited.source_x==2&&inherited.source_y==2&&inherited.progress==0);
+			}
+		// Lookup remains time-aware before synchronize_viewport rebuilds an index.
+		manager.begin_frame(2016);
+		assert(!manager.get_movement(&token,viewport_visual_layer::center,4,1).active);
+		assert(!manager.get_movement(&token,viewport_visual_layer::designation,3,2).active);
+		manager.set_linear(!linear);
+		assert(!manager.get_movement(&token,viewport_visual_layer::center,2,3).active);
+		}
+}
+
+void test_index_cancel_and_discard()
+{
+	constexpr int32_t dim=4;
+	const int token=0;
+	std::array<int32_t,dim*dim> empty{},before{},after{};
+	before[1*dim+1]=11;after[2*dim+1]=11;
+	visual_animation_managerst manager;
+	auto input=make_input(&token,dim,empty.data());
+	set_layer(input,viewport_visual_layer::center,before.data(),empty.data());
+	run_frame(manager,input,1000);
+	set_layer(input,viewport_visual_layer::center,after.data(),before.data());
+	run_frame(manager,input,1016);
+	assert(manager.get_movement(&token,viewport_visual_layer::center,2,1).active);
+	assert(manager.has_mirrored_facing(&token));
+	manager.cancel_transitions();
+	std::vector<int32_t> candidates;
+	manager.active_movement_tiles(&token,candidates);
+	assert(candidates.empty());
+	assert(!manager.get_movement(&token,viewport_visual_layer::right,3,1).active);
+	assert(manager.mirrored_tiles(&token)==std::vector<int32_t>{2*dim+1});
+	manager.begin_frame(1032);manager.end_frame(); // unseen viewport is discarded
+	assert(manager.mirrored_tiles(&token).empty());
+	assert(!manager.has_mirrored_facing(&token));
+	manager.active_movement_tiles(&token,candidates);
+	assert(candidates.empty());
+}
+
 } // namespace
 
 int main()
 {
+	test_equal_motion_companion_identity();
+	test_index_cancel_and_discard();
 	test_foreign_predecessor_history();
 	test_foreign_predecessor_active_origin();
 	test_matching_predecessor_continuity();
